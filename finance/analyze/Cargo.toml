@@ -1,0 +1,12 @@
+[package]
+name = "analyze"
+version = "1.0.0"
+edition = "2024"
+rust-version.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+simple_logger = { workspace = true }
+time = { workspace = true }
+log = { workspace = true }
+dotenvy = { workspace = true }

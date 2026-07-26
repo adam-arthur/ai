@@ -1,0 +1,28 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Generated and downloaded market data
+/data/
+
+# Local environment files and secrets
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Editor settings and temporary files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+
+# Logs and local coverage/profiling output
+*.log
+*.profraw
+*.profdata

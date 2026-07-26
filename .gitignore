@@ -1,0 +1,12 @@
+# Rust build artifacts
+target/
+
+# Local environment files and secrets
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db

@@ -1,0 +1,227 @@
+use std::{collections::HashMap, fs, path::Path};
+
+use async_trait::async_trait;
+use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use time::{
+    Date, Duration, OffsetDateTime, UtcOffset, format_description::{FormatItem, parse, well_known::Rfc3339}
+};
+
+pub static SHORT_ISO_PARSER: Lazy<Vec<FormatItem<'_>>> =
+    Lazy::new(|| parse("[year]-[month]-[day]").expect("Date format template is invalid!"));
+
+/** Provides a mechanism for fetching and caching data for one entity at at time */
+#[async_trait]
+pub trait EnsureDataParams<T> {
+    async fn get_fresh_data(&self, cached_data: Option<T>) -> T;
+    fn get_file_path(&self) -> String;
+    fn get_time_until_cache_is_stale(&self) -> Duration;
+}
+
+/** Provides a mechanism for fetching data for multiple entities and caching data separately for each one */
+#[async_trait]
+pub trait EnsureBatchedDataParams<T> {
+    async fn get_fresh_data(&self, stale_data: &Vec<String>) -> HashMap<String, T>;
+    // fn get_symbols(&self) -> Vec<String>;
+    fn get_symbols(&self) -> &[String];
+    fn get_file_path(&self, symbol: &String) -> String;
+    fn get_time_until_cache_is_stale(&self) -> Duration;
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DataMeta {
+    pub last_updated: String, // "2022-01-11T08:34:58.346-06:00"
+}
+
+// TODO: Should be two types
+pub struct EnsureDataResult<T> {
+    pub value: T,
+    pub was_cached: bool,
+    pub last_updated: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FileSystemData<T> {
+    pub meta: DataMeta,
+    pub value: T,
+}
+
+// Get cached data or refresh
+pub async fn ensure_data<T>(params: &dyn EnsureDataParams<T>) -> EnsureDataResult<T>
+where
+    T: Serialize + DeserializeOwned,
+{
+    let cached_data = get_cached_data::<T>(&params.get_file_path());
+    let is_up_to_date: bool =
+        cached_data.is_some() && !is_stale(&cached_data, params.get_time_until_cache_is_stale());
+
+    if is_up_to_date {
+        log::trace!("ensure_data - cached data is up to date");
+        let cached_data = cached_data.unwrap();
+        return EnsureDataResult {
+            value: cached_data.value,
+            was_cached: true,
+            last_updated: cached_data.meta.last_updated,
+        };
+    }
+
+    log::trace!("ensure_data - cached data was not up to date, fetching new...");
+    let fresh_data = FileSystemData::<T> {
+        meta: DataMeta {
+            last_updated: OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+        },
+        // TODO make async
+        value: params.get_fresh_data(cached_data.map(|v| v.value)).await,
+    };
+
+    let _ = fs::write(
+        params.get_file_path(),
+        serde_json::to_string_pretty(&fresh_data).unwrap(),
+    );
+
+    EnsureDataResult {
+        value: fresh_data.value,
+        was_cached: false,
+        last_updated: fresh_data.meta.last_updated,
+    }
+}
+
+pub async fn ensure_batched_data<T>(params: &dyn EnsureBatchedDataParams<T>) -> bool
+where
+    T: Serialize + DeserializeOwned,
+{
+    let last_updated = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+    // TODO: handle None case
+    let stale_sector_symbols: Vec<String> = params
+        .get_symbols()
+        .iter()
+        .filter(|symbol| {
+            let cached_sector = get_cached_data::<T>(&params.get_file_path(symbol));
+            is_stale(&cached_sector, params.get_time_until_cache_is_stale())
+        })
+        .cloned()
+        .collect();
+
+    if stale_sector_symbols.is_empty() {
+        log::trace!("ensure_data - cached data is up to date");
+        return false;
+    }
+
+    log::trace!("ensure_data - cached data was not up to date, fetching new...");
+    let fresh_batched_data = params.get_fresh_data(&stale_sector_symbols).await;
+    for (symbol, data) in fresh_batched_data.into_iter() {
+        // TODO: Batch FS writes?
+        let _ = fs::write(
+            params.get_file_path(&symbol),
+            serde_json::to_string_pretty(&FileSystemData::<T> {
+                meta: DataMeta {
+                    last_updated: last_updated.clone(),
+                },
+                value: data,
+            })
+            .unwrap(),
+        );
+    }
+
+    // TODO: Parity with ensure_data method
+    !stale_sector_symbols.is_empty()
+}
+
+fn is_stale<T>(data: &Option<FileSystemData<T>>, time_until_cache_is_stale: Duration) -> bool {
+    if data.is_none() {
+        return true;
+    }
+
+    get_time_ago(&data.as_ref().unwrap().meta.last_updated) >= time_until_cache_is_stale
+}
+
+fn get_time_ago(iso_time: &str) -> Duration {
+    OffsetDateTime::now_utc()
+        - OffsetDateTime::parse(iso_time, &Rfc3339).expect("Failed to parse date-time")
+}
+
+fn get_cached_data<T>(cached_path: &String) -> Option<FileSystemData<T>>
+where
+    T: DeserializeOwned,
+{
+    log::trace!("get_cached_data - Searching for \"{}\"", cached_path);
+
+    let does_file_exist = Path::new(&cached_path).exists();
+    if !does_file_exist {
+        log::trace!("get_cached_data - Not found \"{}\"", cached_path);
+        return None;
+    }
+
+    log::trace!("get_cached_data - Found \"{}\"", cached_path);
+
+    let file_contents = fs::read_to_string(cached_path)
+        .unwrap_or_else(|_| panic!("Failed to read file: {}", &cached_path));
+
+    let value: FileSystemData<T> = serde_json::from_str(&file_contents).unwrap_or_else(|error| {
+        panic!(
+            "Failed to deserialize file contents: {} \n {} \n {}",
+            file_contents, error, &cached_path
+        )
+    });
+
+    Some(value)
+}
+
+pub fn parse_iso(date_str: &str) -> OffsetDateTime {
+    OffsetDateTime::parse(date_str, &Rfc3339).expect("Failed to parse date-time")
+}
+
+pub fn parse_short_iso(date_str: &str) -> Date {
+    Date::parse(date_str, &SHORT_ISO_PARSER).expect("Failed to parse date-time")
+}
+
+pub fn to_end_of_day(date_str: &str) -> String {
+    parse_iso(date_str)
+        .replace_time(time::macros::time!(23:59:59))
+        .format(&Rfc3339)
+        .expect("Failed to format date-time")
+}
+
+#[allow(dead_code)]
+pub fn from_iso(date_str: &str) -> OffsetDateTime {
+    OffsetDateTime::parse(date_str, &Rfc3339)
+        .expect("Failed to parse string into date from ISO format")
+}
+
+pub fn from_short_iso(date_str: &str) -> OffsetDateTime {
+    Date::parse(date_str, &SHORT_ISO_PARSER)
+        .expect("Failed to parse string into date from [year]-[month]-[day] format")
+        .midnight()
+        .assume_offset(UtcOffset::from_whole_seconds(0).unwrap())
+}
+
+pub fn to_iso(date: &OffsetDateTime) -> String {
+    date.format(&Rfc3339)
+        .expect("Failed to format date-time")
+        .to_string()
+}
+
+pub fn str_to_short_iso(date_str: &str) -> String {
+    parse_iso(date_str)
+        .format(&SHORT_ISO_PARSER)
+        .expect("Failed to format date-time")
+}
+
+pub fn to_short_iso(date: &OffsetDateTime) -> String {
+    date.format(&SHORT_ISO_PARSER)
+        .expect("Failed to format date-time")
+        .to_string()
+}
+
+#[derive(Debug)]
+pub struct IngestSettings {
+    pub sa_throttle_duration: std::time::Duration,
+    pub sa_fetch_chunk_size: u16,
+    pub decimal_precision: u8,
+}
+
+pub const INGEST_SETTINGS: IngestSettings = IngestSettings {
+    sa_throttle_duration: std::time::Duration::from_secs(180),
+    sa_fetch_chunk_size: 200,
+    decimal_precision: 4,
+};

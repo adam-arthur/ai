@@ -1,0 +1,24 @@
+[package]
+name = "tools"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Tool definitions, implementations, and registries for agent runtimes"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+async-trait = "0.1"
+ignore = "0.4"
+itertools.workspace = true
+rayon.workspace = true
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tap.workspace = true
+tokio = { version = "1", features = ["rt"] }
+utils = { path = "../utils" }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

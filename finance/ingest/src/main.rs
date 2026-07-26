@@ -1,0 +1,68 @@
+extern crate dotenvy;
+
+mod common;
+mod compute_derived;
+mod financials;
+mod ingest_utils;
+mod meta_utils;
+
+use std::{collections::HashSet, env};
+
+use crate::ingest_utils::ingest;
+
+use compute_derived::compute_derived;
+use dotenvy::dotenv;
+use simple_logger::SimpleLogger;
+
+fn load_env_vars() -> HashSet<(String, String)> {
+    let pre_dot_envs = env::vars().collect::<HashSet<_>>();
+    dotenv().ok();
+
+    return env::vars()
+        .collect::<HashSet<_>>()
+        .difference(&pre_dot_envs)
+        .cloned()
+        .collect::<HashSet<_>>();
+}
+
+#[tokio::main]
+async fn main() {
+    SimpleLogger::new()
+        .with_timestamp_format(time::macros::format_description!(
+            "[day] [hour]:[minute]:[second]"
+        ))
+        .with_level(log::LevelFilter::Debug)
+        .init()
+        .unwrap();
+
+    let project_env_vars = load_env_vars();
+    log::debug!("Environment Variables: {:?}", project_env_vars);
+
+    // TODO: Type cli args
+    // const _cliArgs = parseArgs<{
+    //     scriptNumber: number
+    //     parallelism: number
+
+    //     // For distributed execution. Control which actions taken
+    //     removeExisting: boolean
+    //     updateStocks: boolean
+    //     updateMeta: boolean
+    // }>(
+    //     // Remove. Todo: make a bit better
+    //     // '--project', './ingest/tsconfig.json', '--'
+    //     process.argv.filter(arg => arg.startsWith('-')), // TODO: Only works if arg has leading -
+    //     {
+    //         default: {
+    //             scriptNumber: 1,
+    //             parallelism: 1,
+
+    //             removeExisting: false,
+    //             updateStocks: false,
+    //             updateMeta: false,
+    //         }
+    //     }
+    // )
+
+    ingest().await;
+    compute_derived().await;
+}
