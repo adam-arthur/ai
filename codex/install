@@ -1,0 +1,66 @@
+#!/bin/sh
+
+set -eu
+
+REPOSITORY_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+MARKETPLACE_MANIFEST="$REPOSITORY_ROOT/.agents/plugins/marketplace.json"
+AUTOCOMMIT_ROOT="$REPOSITORY_ROOT/plugins/autocommit"
+SUCCINCT_ROOT="$REPOSITORY_ROOT/skills/succinct"
+PSEUDO_ROOT="$REPOSITORY_ROOT/skills/pseudo"
+CODEX_DATA_ROOT=${CODEX_HOME:-"$HOME/.codex"}
+CODEX_SKILLS_ROOT="$CODEX_DATA_ROOT/skills"
+LEGACY_MARKETPLACE=codex-autocommit-local
+LEGACY_PLUGIN=codex-autocommit
+
+for command_name in cargo codex; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "error: required command not found: $command_name" >&2
+    exit 1
+  fi
+done
+
+echo "Building autocommit..."
+cargo build --release --locked --manifest-path "$AUTOCOMMIT_ROOT/Cargo.toml"
+mkdir -p "$AUTOCOMMIT_ROOT/bin"
+install -m 755 \
+  "$AUTOCOMMIT_ROOT/target/release/codex-autocommit" \
+  "$AUTOCOMMIT_ROOT/bin/codex-autocommit"
+
+echo "Installing succinct skill..."
+install -d "$CODEX_SKILLS_ROOT/succinct/agents"
+install -m 644 "$SUCCINCT_ROOT/SKILL.md" "$CODEX_SKILLS_ROOT/succinct/SKILL.md"
+install -m 644 \
+  "$SUCCINCT_ROOT/agents/openai.yaml" \
+  "$CODEX_SKILLS_ROOT/succinct/agents/openai.yaml"
+
+echo "Installing pseudo skill..."
+install -d "$CODEX_SKILLS_ROOT/pseudo/agents"
+install -m 644 "$PSEUDO_ROOT/SKILL.md" "$CODEX_SKILLS_ROOT/pseudo/SKILL.md"
+install -m 644 \
+  "$PSEUDO_ROOT/agents/openai.yaml" \
+  "$CODEX_SKILLS_ROOT/pseudo/agents/openai.yaml"
+
+# Codex installs a plugin snapshot. Give every install a fresh version so an
+# updated local implementation replaces the snapshot already in its cache.
+INSTALL_METADATA=$(
+  "$AUTOCOMMIT_ROOT/target/release/plugin-installer" prepare "$MARKETPLACE_MANIFEST"
+)
+MARKETPLACE_NAME=$(printf '%s\n' "$INSTALL_METADATA" | sed -n '1p')
+
+# Do not inspect registrations before repairing them: Codex cannot list its
+# marketplaces when a registered local checkout has moved. Removing an absent
+# registration is harmless, and re-adding this one also repairs a moved clone.
+codex plugin remove "$LEGACY_PLUGIN@$LEGACY_MARKETPLACE" >/dev/null 2>&1 || true
+for obsolete_plugin in summarize pseudo; do
+  codex plugin remove "$obsolete_plugin@$MARKETPLACE_NAME" >/dev/null 2>&1 || true
+done
+codex plugin marketplace remove "$LEGACY_MARKETPLACE" >/dev/null 2>&1 || true
+codex plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
+codex plugin marketplace add "$REPOSITORY_ROOT" >/dev/null
+
+printf '%s\n' "$INSTALL_METADATA" | sed -n '2,$p' | while IFS= read -r plugin_name; do
+  echo "Installing $plugin_name@$MARKETPLACE_NAME..."
+  codex plugin add "$plugin_name@$MARKETPLACE_NAME" >/dev/null
+done
+
+echo "Codex tools are installed. Start a new Codex thread to load them."

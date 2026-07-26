@@ -1,0 +1,7 @@
+interface:
+  display_name: "Succinct"
+  short_description: "Shorten Codex's previous response"
+  default_prompt: "Use $succinct to shorten your previous response."
+
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Pseudo"
+  short_description: "Summarize the prior response as JS-style pseudo-code"
+  default_prompt: "Use $pseudo to summarize your previous response as JS-style pseudo-code."
+
+policy:
+  allow_implicit_invocation: false

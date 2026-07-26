@@ -1,0 +1,20 @@
+{
+  "name": "autocommit",
+  "version": "0.1.0+codex.1785110204116588",
+  "description": "Batch changes from overlapping Codex sessions into automatic Git commits.",
+  "author": {
+    "name": "Local developer"
+  },
+  "interface": {
+    "displayName": "Codex Autocommit",
+    "shortDescription": "Batch session changes into Git commits.",
+    "longDescription": "Codex Autocommit collects changes from concurrent and sequential Codex sessions, summarizes completed work in the background, and commits the combined working tree as soon as no active session has uncommitted writes.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Git",
+      "Automation"
+    ],
+    "defaultPrompt": "Show the current Codex autocommit batch status."
+  }
+}

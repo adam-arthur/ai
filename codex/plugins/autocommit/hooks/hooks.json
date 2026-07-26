@@ -1,0 +1,53 @@
+{
+  "description": "Track Codex writes and commit when no active session has uncommitted writes.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CODEX_AUTOCOMMIT_OWNER_PID=\"$PPID\" \"$PLUGIN_DATA/bin/codex-autocommit\" event",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CODEX_AUTOCOMMIT_OWNER_PID=\"$PPID\" \"$PLUGIN_DATA/bin/codex-autocommit\" event",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p \"$PLUGIN_DATA/bin\" && install -m 755 \"$PLUGIN_ROOT/bin/codex-autocommit\" \"$PLUGIN_DATA/bin/.codex-autocommit.$$\" && mv -f \"$PLUGIN_DATA/bin/.codex-autocommit.$$\" \"$PLUGIN_DATA/bin/codex-autocommit\" && CODEX_AUTOCOMMIT_OWNER_PID=\"$PPID\" \"$PLUGIN_DATA/bin/codex-autocommit\" event",
+            "timeout": 3,
+            "statusMessage": "Joining the Git autocommit batch"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CODEX_AUTOCOMMIT_OWNER_PID=\"$PPID\" \"$PLUGIN_DATA/bin/codex-autocommit\" event",
+            "timeout": 3,
+            "statusMessage": "Queuing the Git autocommit batch"
+          }
+        ]
+      }
+    ]
+  }
+}
