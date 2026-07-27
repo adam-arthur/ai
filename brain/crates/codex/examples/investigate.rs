@@ -1,4 +1,4 @@
-use brain::{FlowError, Internet, complete, fail, flow, next, node};
+use brain::{FlowError, Internet, complete, flow, next, node};
 use brain_codex::CodexRuntime;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,18 +38,14 @@ async fn main() -> Result<(), FlowError> {
 
     let run = flow::<String>("investigate")
         .begins_with(research.with(ResearchInput { topic }))
-        .after(research, move |outcome| match outcome {
-            Ok(result) => next(analyze.with(AnalysisInput {
+        .after(research, move |result| {
+            next(analyze.with(AnalysisInput {
                 finding: result.finding,
-            })),
-            Err(failure) => fail(failure),
+            }))
         })
-        .after(analyze, move |outcome| match outcome {
-            Ok(result) => match result.follow_up {
-                Some(topic) => next(research.with(ResearchInput { topic })),
-                None => complete(result.report),
-            },
-            Err(failure) => fail(failure),
+        .after(analyze, move |result| match result.follow_up {
+            Some(topic) => next(research.with(ResearchInput { topic })),
+            None => complete(result.report),
         })
         .run(&CodexRuntime::new())
         .await?;

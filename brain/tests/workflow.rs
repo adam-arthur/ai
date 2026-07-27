@@ -67,17 +67,16 @@ async fn runs_heterogeneous_nodes_and_completes_with_a_typed_value() {
         .begins_with(research.with(ResearchInput {
             topic: "agent workflows".into(),
         }))
-        .after(research, move |outcome| match outcome {
-            Ok(result) if result.needs_analysis => next(analyze.with(AnalysisInput {
-                finding: result.finding,
-            })),
-            Ok(result) => complete(result.finding),
-            Err(failure) => fail(failure),
+        .after(research, move |result| {
+            if result.needs_analysis {
+                next(analyze.with(AnalysisInput {
+                    finding: result.finding,
+                }))
+            } else {
+                complete(result.finding)
+            }
         })
-        .after(analyze, |outcome| match outcome {
-            Ok(result) => complete(result.report),
-            Err(failure) => fail(failure),
-        })
+        .after(analyze, |result| complete(result.report))
         .run_with(
             &runtime,
             RunConfig::new()
@@ -120,14 +119,15 @@ async fn a_failure_handler_can_route_to_the_same_node_as_an_ordinary_next_transi
     let research = node::<AttemptInput, AttemptOutput>("research").prompt("Return an answer.");
     let run = flow::<String>("retry-by-routing")
         .begins_with(research.with(AttemptInput { attempt: 1 }))
-        .after(research, move |outcome| match outcome {
-            Ok(result) => complete(result.answer),
-            Err(failure) if failure.error().is_invalid_output() => {
+        .after(research, |result| complete(result.answer))
+        .after_error(research, move |failure| {
+            if failure.error().is_invalid_output() {
                 let mut input = failure.into_input();
                 input.attempt += 1;
                 next(research.with(input))
-            },
-            Err(failure) => fail(failure),
+            } else {
+                fail(failure)
+            }
         })
         .run_with(&runtime, RunConfig::new().debug_directory(&debug))
         .await
@@ -140,22 +140,40 @@ async fn a_failure_handler_can_route_to_the_same_node_as_an_ordinary_next_transi
 }
 
 #[tokio::test]
-async fn runtime_failures_reach_the_same_after_handler_with_the_original_input() {
+async fn runtime_failures_reach_after_error_with_the_original_input() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = QueueRuntime::new([Err(RuntimeError::new("model unavailable"))]);
     let research = node::<AttemptInput, AttemptOutput>("research").prompt("Return an answer.");
 
     let error = flow::<String>("failure")
         .begins_with(research.with(AttemptInput { attempt: 7 }))
-        .after(research, |outcome| match outcome {
-            Ok(result) => complete(result.answer),
-            Err(failure) => {
-                assert_eq!(failure.input().attempt, 7);
-                assert_eq!(failure.invocation(), 1);
-                assert!(failure.error().is_runtime());
-                fail(failure)
-            },
+        .after(research, |result| complete(result.answer))
+        .after_error(research, |failure| {
+            assert_eq!(failure.input().attempt, 7);
+            assert_eq!(failure.invocation(), 1);
+            assert!(failure.error().is_runtime());
+            fail(failure)
         })
+        .run_with(
+            &runtime,
+            RunConfig::new().debug_directory(temporary.path().join("debug")),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, FlowError::Failed(_)));
+    assert!(error.to_string().contains("model unavailable"));
+}
+
+#[tokio::test]
+async fn failures_stop_the_flow_without_an_after_error_handler() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runtime = QueueRuntime::new([Err(RuntimeError::new("model unavailable"))]);
+    let research = node::<AttemptInput, AttemptOutput>("research").prompt("Return an answer.");
+
+    let error = flow::<String>("failure")
+        .begins_with(research.with(AttemptInput { attempt: 1 }))
+        .after(research, |_| panic!("the success handler must not run"))
         .run_with(
             &runtime,
             RunConfig::new().debug_directory(temporary.path().join("debug")),
@@ -196,10 +214,7 @@ async fn rejects_a_differently_configured_copy_of_a_registered_node() {
 
     let error = flow::<String>("invalid")
         .begins_with(unconfigured.with(AttemptInput { attempt: 1 }))
-        .after(configured, |outcome| match outcome {
-            Ok(result) => complete(result.answer),
-            Err(failure) => fail(failure),
-        })
+        .after(configured, |result| complete(result.answer))
         .run_with(
             &runtime,
             RunConfig::new().debug_directory(temporary.path().join("debug")),

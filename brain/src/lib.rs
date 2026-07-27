@@ -13,6 +13,6 @@ mod workflow;
 
 pub use async_trait::async_trait;
 pub use error::{FlowError, FlowFailure, InvocationError, InvocationErrorKind};
-pub use node::{Node, NodeFailure, NodeInvocation, NodeOutcome, node};
+pub use node::{Node, NodeFailure, NodeInvocation, node};
 pub use runtime::{Access, AgentRuntime, Internet, RuntimeError, RuntimeRequest, RuntimeResponse};
 pub use workflow::{Flow, FlowRun, RunConfig, Transition, complete, fail, flow, next};

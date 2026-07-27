@@ -12,7 +12,7 @@ The project is a small workspace:
 ## Example
 
 ```rust,no_run
-use brain::{Access, Internet, RunConfig, complete, fail, flow, next, node};
+use brain::{Access, Internet, RunConfig, complete, flow, next, node};
 use brain_codex::CodexRuntime;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -50,19 +50,16 @@ let run = flow::<String>("investigate")
     .begins_with(research.with(ResearchInput {
         topic: "typed agent workflows".into(),
     }))
-    .after(research, move |outcome| match outcome {
-        Ok(result) if result.needs_analysis => {
+    .after(research, move |result| {
+        if result.needs_analysis {
             next(analyze.with(AnalysisInput {
                 finding: result.finding,
             }))
+        } else {
+            complete(result.finding)
         }
-        Ok(result) => complete(result.finding),
-        Err(failure) => fail(failure),
     })
-    .after(analyze, |outcome| match outcome {
-        Ok(result) => complete(result.report),
-        Err(failure) => fail(failure),
-    })
+    .after(analyze, |result| complete(result.report))
     .run_with(
         &CodexRuntime::new(),
         RunConfig::new()
@@ -76,17 +73,20 @@ println!("{}", run.output);
 # }
 ```
 
-Every node has one `.after` function. It receives either the typed output or a
-`NodeFailure` that still owns the original input. Sending that input back to the
-same node is an ordinary transition rather than a special retry:
+Every node has one `.after` function that receives its typed output. A failure
+stops the flow automatically unless the node has an `.after_error` function.
+The `NodeFailure` passed to that function still owns the original input, so
+sending it back to the same node is an ordinary transition rather than a
+special retry:
 
 ```rust,ignore
-.after(research, move |outcome| match outcome {
-    Ok(result) => complete(result),
-    Err(failure) if failure.error().is_invalid_output() => {
+.after(research, complete)
+.after_error(research, move |failure| {
+    if failure.error().is_invalid_output() {
         next(research_again.with(failure.into_input()))
+    } else {
+        fail(failure)
     }
-    Err(failure) => fail(failure),
 })
 ```
 

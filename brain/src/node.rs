@@ -82,9 +82,6 @@ pub struct NodeInvocation<I, O> {
     pub(crate) input: I,
 }
 
-/// The result delivered to the function registered with [`crate::Flow::after`].
-pub type NodeOutcome<I, O> = Result<O, NodeFailure<I>>;
-
 /// A failed node invocation that retains ownership of its original input.
 #[derive(Debug)]
 pub struct NodeFailure<I> {

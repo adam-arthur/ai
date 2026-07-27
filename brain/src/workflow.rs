@@ -4,7 +4,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-use crate::{AgentRuntime, FlowError, FlowFailure, InvocationError, Node, NodeFailure, NodeInvocation, NodeOutcome, RuntimeError, RuntimeRequest, RuntimeResponse, node::NodeSpec};
+use crate::{AgentRuntime, FlowError, FlowFailure, InvocationError, Node, NodeFailure, NodeInvocation, RuntimeError, RuntimeRequest, RuntimeResponse, node::NodeSpec};
 
 /// Creates an empty typed flow definition.
 pub fn flow<W>(name: impl Into<String>) -> Flow<W> {
@@ -129,12 +129,15 @@ impl<W> Flow<W> {
         self
     }
 
-    /// Registers the single function that handles both success and failure for a node.
+    /// Registers the function that handles a successful node invocation.
+    ///
+    /// Failures stop the flow unless an [`Self::after_error`] handler is
+    /// registered for this node.
     pub fn after<I, O, F>(mut self, node: Node<I, O>, handler: F) -> Self
     where
         I: Serialize + Send + 'static,
         O: DeserializeOwned + JsonSchema + Send + 'static,
-        F: Fn(NodeOutcome<I, O>) -> Transition<W> + Send + Sync + 'static,
+        F: Fn(O) -> Transition<W> + Send + Sync + 'static,
     {
         let name = node.spec.name;
         if self.handlers.contains_key(name) {
@@ -146,12 +149,46 @@ impl<W> Flow<W> {
             name.to_owned(),
             HandlerRegistration {
                 spec: node.spec,
-                handler: Box::new(TypedHandler {
+                success_handler: Box::new(TypedSuccessHandler::<F, O> {
                     handler,
                     marker: PhantomData,
                 }),
+                default_error_handler: Box::new(TypedDefaultErrorHandler::<I> { marker: PhantomData }),
+                error_handler: None,
             },
         );
+        self
+    }
+
+    /// Registers an optional recovery function for a failed node invocation.
+    ///
+    /// The corresponding [`Self::after`] handler must be registered first.
+    pub fn after_error<I, O, F>(mut self, node: Node<I, O>, handler: F) -> Self
+    where
+        I: Serialize + Send + 'static,
+        O: DeserializeOwned + JsonSchema + Send + 'static,
+        F: Fn(NodeFailure<I>) -> Transition<W> + Send + Sync + 'static,
+    {
+        let name = node.spec.name;
+        let Some(registration) = self.handlers.get_mut(name) else {
+            self.definition_errors.push(format!(
+                "node `{name}` has an `after_error` handler but no `after` handler"
+            ));
+            return self;
+        };
+        if registration.spec != node.spec {
+            self.definition_errors.push(format!(
+                "the `after_error` handler for node `{name}` did not use its registered node handle"
+            ));
+        } else if registration.error_handler.is_some() {
+            self.definition_errors
+                .push(format!("node `{name}` has more than one `after_error` handler"));
+        } else {
+            registration.error_handler = Some(Box::new(TypedErrorHandler::<F, I> {
+                handler,
+                marker: PhantomData,
+            }));
+        }
         self
     }
 
@@ -231,10 +268,22 @@ impl<W> Flow<W> {
                 },
             };
 
-            if let Some(parsed_output) = &erased_outcome.parsed_output {
-                write_json(invocation_directory.join("response.json"), parsed_output)?;
-            }
-            let transition = registration.handler.handle(erased_outcome.outcome, node_name)?;
+            let transition = match erased_outcome {
+                ErasedNodeOutcome::Success { output, parsed_output } => {
+                    write_json(invocation_directory.join("response.json"), &parsed_output)?;
+                    registration.success_handler.handle(output, node_name)?
+                },
+                ErasedNodeOutcome::Failure { failure, parsed_output } => {
+                    if let Some(parsed_output) = parsed_output {
+                        write_json(invocation_directory.join("response.json"), &parsed_output)?;
+                    }
+                    registration
+                        .error_handler
+                        .as_deref()
+                        .unwrap_or(registration.default_error_handler.as_ref())
+                        .handle(failure, node_name)?
+                },
+            };
             record_transition(&invocation_directory, &transition)?;
 
             match transition.kind {
@@ -387,35 +436,80 @@ fn write_json_lines(path: impl Into<PathBuf>, values: &[Value]) -> Result<(), Fl
 
 struct HandlerRegistration<W> {
     spec: NodeSpec,
-    handler: Box<dyn ErasedHandler<W>>,
+    success_handler: Box<dyn ErasedSuccessHandler<W>>,
+    default_error_handler: Box<dyn ErasedErrorHandler<W>>,
+    error_handler: Option<Box<dyn ErasedErrorHandler<W>>>,
 }
 
-trait ErasedHandler<W>: Send + Sync {
-    fn handle(&self, outcome: Box<dyn Any + Send>, node_name: &str) -> Result<Transition<W>, FlowError>;
+trait ErasedSuccessHandler<W>: Send + Sync {
+    fn handle(&self, output: Box<dyn Any + Send>, node_name: &str) -> Result<Transition<W>, FlowError>;
 }
 
-struct TypedHandler<F, I, O> {
+struct TypedSuccessHandler<F, O> {
     handler: F,
-    marker: PhantomData<fn(I) -> O>,
+    marker: PhantomData<fn() -> O>,
 }
 
-impl<W, I, O, F> ErasedHandler<W> for TypedHandler<F, I, O>
+impl<W, O, F> ErasedSuccessHandler<W> for TypedSuccessHandler<F, O>
 where
-    I: Send + 'static,
     O: Send + 'static,
-    F: Fn(NodeOutcome<I, O>) -> Transition<W> + Send + Sync,
+    F: Fn(O) -> Transition<W> + Send + Sync,
 {
-    fn handle(&self, outcome: Box<dyn Any + Send>, node_name: &str) -> Result<Transition<W>, FlowError> {
-        let outcome = outcome
-            .downcast::<NodeOutcome<I, O>>()
+    fn handle(&self, output: Box<dyn Any + Send>, node_name: &str) -> Result<Transition<W>, FlowError> {
+        let output = output
+            .downcast::<O>()
             .map_err(|_| FlowError::TypeMismatch(node_name.into()))?;
-        Ok((self.handler)(*outcome))
+        Ok((self.handler)(*output))
     }
 }
 
-struct ErasedNodeOutcome {
-    outcome: Box<dyn Any + Send>,
-    parsed_output: Option<Value>,
+trait ErasedErrorHandler<W>: Send + Sync {
+    fn handle(&self, failure: Box<dyn Any + Send>, node_name: &str) -> Result<Transition<W>, FlowError>;
+}
+
+struct TypedDefaultErrorHandler<I> {
+    marker: PhantomData<fn(I)>,
+}
+
+impl<W, I> ErasedErrorHandler<W> for TypedDefaultErrorHandler<I>
+where
+    I: Send + 'static,
+{
+    fn handle(&self, failure: Box<dyn Any + Send>, node_name: &str) -> Result<Transition<W>, FlowError> {
+        let failure = failure
+            .downcast::<NodeFailure<I>>()
+            .map_err(|_| FlowError::TypeMismatch(node_name.into()))?;
+        Ok(fail(*failure))
+    }
+}
+
+struct TypedErrorHandler<F, I> {
+    handler: F,
+    marker: PhantomData<fn(I)>,
+}
+
+impl<W, I, F> ErasedErrorHandler<W> for TypedErrorHandler<F, I>
+where
+    I: Send + 'static,
+    F: Fn(NodeFailure<I>) -> Transition<W> + Send + Sync,
+{
+    fn handle(&self, failure: Box<dyn Any + Send>, node_name: &str) -> Result<Transition<W>, FlowError> {
+        let failure = failure
+            .downcast::<NodeFailure<I>>()
+            .map_err(|_| FlowError::TypeMismatch(node_name.into()))?;
+        Ok((self.handler)(*failure))
+    }
+}
+
+enum ErasedNodeOutcome {
+    Success {
+        output: Box<dyn Any + Send>,
+        parsed_output: Value,
+    },
+    Failure {
+        failure: Box<dyn Any + Send>,
+        parsed_output: Option<Value>,
+    },
 }
 
 trait ErasedInvocation: Send {
@@ -461,32 +555,32 @@ where
         match result {
             Ok(raw_output) => match serde_json::from_str::<Value>(&raw_output) {
                 Ok(value) => match serde_json::from_value::<O>(value.clone()) {
-                    Ok(output) => ErasedNodeOutcome {
-                        outcome: Box::new(Ok::<O, NodeFailure<I>>(output)),
-                        parsed_output: Some(value),
+                    Ok(output) => ErasedNodeOutcome::Success {
+                        output: Box::new(output),
+                        parsed_output: value,
                     },
-                    Err(error) => ErasedNodeOutcome {
-                        outcome: Box::new(Err::<O, NodeFailure<I>>(NodeFailure::new(
+                    Err(error) => ErasedNodeOutcome::Failure {
+                        failure: Box::new(NodeFailure::new(
                             input,
                             InvocationError::invalid_output(format!(
                                 "node output did not match its Rust type: {error}"
                             )),
                             invocation,
-                        ))),
+                        )),
                         parsed_output: Some(value),
                     },
                 },
-                Err(error) => ErasedNodeOutcome {
-                    outcome: Box::new(Err::<O, NodeFailure<I>>(NodeFailure::new(
+                Err(error) => ErasedNodeOutcome::Failure {
+                    failure: Box::new(NodeFailure::new(
                         input,
                         InvocationError::invalid_output(format!("node returned invalid JSON: {error}")),
                         invocation,
-                    ))),
+                    )),
                     parsed_output: None,
                 },
             },
-            Err(error) => ErasedNodeOutcome {
-                outcome: Box::new(Err::<O, NodeFailure<I>>(NodeFailure::new(input, error, invocation))),
+            Err(error) => ErasedNodeOutcome::Failure {
+                failure: Box::new(NodeFailure::new(input, error, invocation)),
                 parsed_output: None,
             },
         }
