@@ -1,0 +1,7 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./workspaces/brain" },
+    { "path": "./workspaces/codex" }
+  ]
+}
