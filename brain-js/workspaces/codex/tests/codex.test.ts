@@ -11,7 +11,7 @@ import {
 } from "brain-js";
 import { CodexRuntime } from "brain-js-codex";
 
-import { commandArguments, parseEvents } from "../dist/command.js";
+import { commandArguments, parseEvents } from "../src/command.ts";
 
 function request(
   access: (typeof Access)[keyof typeof Access],
@@ -83,4 +83,3 @@ console.log(JSON.stringify({ type: "turn.completed" }));
   assert.equal(response.output, '{"answer":"ok"}');
   assert.deepEqual(response.events, [{ type: "turn.completed" }]);
 });
-

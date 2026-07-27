@@ -8,20 +8,20 @@ import {
   FlowFailure,
   InvocationError,
   errorMessage,
-} from "./error.js";
+} from "./error.ts";
 import {
   NodeFailure,
   type Node,
   type NodeInvocation,
   type NodeOutcome,
   type NodeSpec,
-} from "./node.js";
+} from "./node.ts";
 import {
   type AgentRuntime,
   RuntimeError,
   type RuntimeRequest,
   type RuntimeResponse,
-} from "./runtime.js";
+} from "./runtime.ts";
 
 type AnyInvocation = NodeInvocation<unknown, unknown>;
 
@@ -32,8 +32,12 @@ type TransitionKind<W> =
 
 /** The next action selected by a deterministic node handler. */
 export class Transition<out W> {
+  readonly _kind: TransitionKind<W>;
+
   /** @internal */
-  constructor(readonly _kind: TransitionKind<W>) {}
+  constructor(kind: TransitionKind<W>) {
+    this._kind = kind;
+  }
 }
 
 /** Routes execution to one node invocation. */

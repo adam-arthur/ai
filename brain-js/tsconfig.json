@@ -1,7 +1,17 @@
 {
-  "files": [],
-  "references": [
-    { "path": "./workspaces/brain" },
-    { "path": "./workspaces/codex" }
-  ]
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "noEmit": true,
+    "types": ["node"],
+    "skipLibCheck": true
+  },
+  "include": ["workspaces/**/*.ts"]
 }

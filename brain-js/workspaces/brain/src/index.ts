@@ -4,14 +4,14 @@ export {
   FlowFailure,
   InvocationError,
   InvocationErrorKind,
-} from "./error.js";
+} from "./error.ts";
 export {
   Node,
   NodeFailure,
   NodeInvocation,
   node,
   type NodeOutcome,
-} from "./node.js";
+} from "./node.ts";
 export {
   Access,
   Internet,
@@ -20,7 +20,7 @@ export {
   type AgentRuntime,
   type RuntimeDiagnostics,
   type RuntimeRequest,
-} from "./runtime.js";
+} from "./runtime.ts";
 export {
   Flow,
   RunConfig,
@@ -31,4 +31,4 @@ export {
   next,
   type FlowRun,
   type RunConfigOptions,
-} from "./workflow.js";
+} from "./workflow.ts";

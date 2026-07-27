@@ -10,7 +10,7 @@ import {
   type RuntimeRequest,
 } from "brain-js";
 
-import { commandArguments, parseEvents } from "./command.js";
+import { commandArguments, parseEvents } from "./command.ts";
 
 interface ProcessOutput {
   readonly code: number | null;
@@ -126,4 +126,3 @@ function runProcess(
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
-

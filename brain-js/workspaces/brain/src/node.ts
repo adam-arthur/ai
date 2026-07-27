@@ -1,7 +1,7 @@
 import type { ZodType } from "zod";
 
-import { Access, Internet } from "./runtime.js";
-import type { InvocationError } from "./error.js";
+import { Access, Internet } from "./runtime.ts";
+import type { InvocationError } from "./error.ts";
 
 export interface NodeSpec<O> {
   readonly name: string;
@@ -67,11 +67,14 @@ export function node<I, O>(name: string, outputSchema: ZodType<O>): Node<I, O> {
 
 /** A typed request to invoke a particular node. */
 export class NodeInvocation<I, O> {
+  readonly node: Node<I, O>;
+  readonly input: I;
+
   /** @internal */
-  constructor(
-    readonly node: Node<I, O>,
-    readonly input: I,
-  ) {}
+  constructor(node: Node<I, O>, input: I) {
+    this.node = node;
+    this.input = input;
+  }
 }
 
 export type NodeOutcome<I, O> =

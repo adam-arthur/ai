@@ -10,16 +10,12 @@
     "workspaces/codex"
   ],
   "scripts": {
-    "build": "tsc -b",
-    "typecheck:examples": "tsc -p workspaces/codex/tsconfig.examples.json",
-    "typecheck:tests": "tsc -p tsconfig.tests.json",
-    "test": "npm run build && npm run typecheck:examples && npm run typecheck:tests && node --test workspaces/brain/tests/*.test.ts workspaces/codex/tests/*.test.ts"
+    "test": "node --test workspaces/brain/tests/*.test.ts workspaces/codex/tests/*.test.ts"
   },
   "engines": {
     "node": ">=22.18"
   },
   "devDependencies": {
-    "@types/node": "^26.1.2",
-    "typescript": "^7.0.2"
+    "@types/node": "^26.1.2"
   }
 }

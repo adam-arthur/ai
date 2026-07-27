@@ -149,6 +149,8 @@ npm install
 npm test
 ```
 
+Node.js runs the TypeScript sources and tests directly using native type
+stripping; there is no compilation step.
+
 The complete Codex example is in
 `workspaces/codex/examples/investigate.ts`.
-
