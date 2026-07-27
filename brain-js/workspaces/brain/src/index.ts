@@ -6,29 +6,28 @@ export {
   InvocationErrorKind,
 } from "./error.ts";
 export {
-  Node,
-  NodeFailure,
-  NodeInvocation,
   node,
+  type Node,
+  type NodeInvocation,
+  type NodeOptions,
   type NodeOutcome,
 } from "./node.ts";
 export {
   Access,
   Internet,
   RuntimeError,
-  RuntimeResponse,
   type AgentRuntime,
   type RuntimeDiagnostics,
   type RuntimeRequest,
+  type RuntimeResponse,
 } from "./runtime.ts";
 export {
-  Flow,
-  RunConfig,
-  Transition,
   complete,
   fail,
   flow,
   next,
+  type Flow,
   type FlowRun,
-  type RunConfigOptions,
+  type FlowRunOptions,
+  type Transition,
 } from "./workflow.ts";

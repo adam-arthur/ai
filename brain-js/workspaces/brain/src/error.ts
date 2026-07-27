@@ -29,17 +29,6 @@ export class InvocationError extends Error {
     return new InvocationError(InvocationErrorKind.InvalidOutput, message);
   }
 
-  isInvalidInput(): boolean {
-    return this.kind === InvocationErrorKind.InvalidInput;
-  }
-
-  isRuntime(): boolean {
-    return this.kind === InvocationErrorKind.Runtime;
-  }
-
-  isInvalidOutput(): boolean {
-    return this.kind === InvocationErrorKind.InvalidOutput;
-  }
 }
 
 /** A consumer-selected failure that stops a flow. */

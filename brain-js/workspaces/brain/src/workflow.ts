@@ -10,7 +10,6 @@ import {
   errorMessage,
 } from "./error.ts";
 import {
-  NodeFailure,
   type Node,
   type NodeInvocation,
   type NodeOutcome,
@@ -24,6 +23,14 @@ import {
 } from "./runtime.ts";
 
 type AnyInvocation = NodeInvocation<unknown, unknown>;
+
+function failureOutcome<I>(
+  input: I,
+  error: InvocationError,
+  invocation: number,
+): NodeOutcome<I, never> {
+  return { ok: false, error, input, invocation };
+}
 
 type TransitionKind<W> =
   | { readonly type: "next"; readonly invocation: AnyInvocation }
@@ -62,34 +69,14 @@ export function fail(
   return new Transition({ type: "fail", failure });
 }
 
-export interface RunConfigOptions {
+export interface FlowRunOptions {
   workingDirectory?: string;
   debugDirectory?: string;
 }
 
-/** Filesystem settings for one sequential flow run. */
-export class RunConfig {
+interface ResolvedFlowRunOptions {
   readonly workingDirectoryPath: string;
   readonly debugDirectoryPath: string;
-
-  constructor(options: RunConfigOptions = {}) {
-    this.workingDirectoryPath = options.workingDirectory ?? ".";
-    this.debugDirectoryPath = options.debugDirectory ?? "debug";
-  }
-
-  workingDirectory(path: string): RunConfig {
-    return new RunConfig({
-      workingDirectory: path,
-      debugDirectory: this.debugDirectoryPath,
-    });
-  }
-
-  debugDirectory(path: string): RunConfig {
-    return new RunConfig({
-      workingDirectory: this.workingDirectoryPath,
-      debugDirectory: path,
-    });
-  }
 }
 
 /** A completed flow and its final typed value. */
@@ -101,7 +88,7 @@ export interface FlowRun<W> {
 }
 
 interface HandlerRegistration<W> {
-  readonly spec: NodeSpec<unknown>;
+  readonly spec: NodeSpec<unknown, unknown>;
   readonly handle: (outcome: NodeOutcome<unknown, unknown>) => Transition<W>;
 }
 
@@ -109,7 +96,8 @@ interface HandlerRegistration<W> {
 export class Flow<W> {
   readonly #name: string;
   #initial?: AnyInvocation;
-  readonly #handlers = new Map<string, HandlerRegistration<W>>();
+  readonly #handlers = new Map<object, HandlerRegistration<W>>();
+  readonly #nodeNames = new Map<string, object>();
   readonly #definitionErrors: string[] = [];
 
   constructor(name: string) {
@@ -117,7 +105,7 @@ export class Flow<W> {
   }
 
   /** Selects the first node invocation in the flow. */
-  beginsWith<I, O>(invocation: NodeInvocation<I, O>): this {
+  startWith<I, O>(invocation: NodeInvocation<I, O>): this {
     if (this.#initial !== undefined) {
       this.#definitionErrors.push("a flow can only have one initial invocation");
     } else {
@@ -127,19 +115,25 @@ export class Flow<W> {
   }
 
   /** Registers the single function that handles success and failure for a node. */
-  after<I, O>(
+  on<I, O>(
     node: Node<I, O>,
     handler: (outcome: NodeOutcome<I, O>) => Transition<W>,
   ): this {
     const name = node.name;
-    if (this.#handlers.has(name)) {
+    if (this.#handlers.has(node)) {
       this.#definitionErrors.push(
-        `node \`${name}\` has more than one \`after\` handler`,
+        `node \`${name}\` has more than one \`on\` handler`,
       );
       return this;
     }
-    this.#handlers.set(name, {
-      spec: node._spec as NodeSpec<unknown>,
+    const namedNode = this.#nodeNames.get(name);
+    if (namedNode !== undefined && namedNode !== node) {
+      this.#definitionErrors.push(`more than one node is named \`${name}\``);
+      return this;
+    }
+    this.#nodeNames.set(name, node);
+    this.#handlers.set(node, {
+      spec: node._spec as NodeSpec<unknown, unknown>,
       handle: handler as (
         outcome: NodeOutcome<unknown, unknown>,
       ) => Transition<W>,
@@ -147,16 +141,12 @@ export class Flow<W> {
     return this;
   }
 
-  /** Runs in the current directory and writes traces beneath `debug`. */
-  async run(runtime: AgentRuntime): Promise<FlowRun<W>> {
-    return this.runWith(runtime, new RunConfig());
-  }
-
-  /** Runs with explicit working and debug directories. */
-  async runWith(
+  /** Runs the flow using optional working and debug directories. */
+  async run(
     runtime: AgentRuntime,
-    config: RunConfig,
+    options: FlowRunOptions = {},
   ): Promise<FlowRun<W>> {
+    const config = resolveRunOptions(options);
     this.validate();
     let current = this.#initial as AnyInvocation;
     let sequence = await prepareDebugDirectory(config.debugDirectoryPath);
@@ -230,7 +220,7 @@ export class Flow<W> {
   private async invoke(
     invocation: AnyInvocation,
     runtime: AgentRuntime,
-    config: RunConfig,
+    config: ResolvedFlowRunOptions,
     invocationDirectory: string,
     outputSchema: unknown,
     sequence: number,
@@ -240,20 +230,29 @@ export class Flow<W> {
   }> {
     let input: unknown;
     try {
-      input = jsonValue(invocation.input);
-    } catch (error) {
-      await writeText(join(invocationDirectory, "input.error.txt"), errorMessage(error));
-      return {
-        outcome: {
-          ok: false,
-          failure: new NodeFailure(
+      const parsed = invocation.node._spec.inputSchema.safeParse(invocation.input);
+      if (!parsed.success) {
+        return {
+          outcome: failureOutcome(
             invocation.input,
             InvocationError.invalidInput(
-              `failed to serialize node input: ${errorMessage(error)}`,
+              `node input did not match its schema: ${parsed.error.message}`,
             ),
             sequence,
           ),
-        },
+        };
+      }
+      input = jsonValue(parsed.data);
+    } catch (error) {
+      await writeText(join(invocationDirectory, "input.error.txt"), errorMessage(error));
+      return {
+        outcome: failureOutcome(
+          invocation.input,
+          InvocationError.invalidInput(
+            `failed to validate or serialize node input: ${errorMessage(error)}`,
+          ),
+          sequence,
+        ),
       };
     }
     await writeJson(join(invocationDirectory, "input.json"), input);
@@ -281,14 +280,11 @@ export class Flow<W> {
           : new RuntimeError(errorMessage(error));
       await recordRuntimeFailure(invocationDirectory, runtimeError);
       return {
-        outcome: {
-          ok: false,
-          failure: new NodeFailure(
-            invocation.input,
-            InvocationError.runtime(runtimeError.message),
-            sequence,
-          ),
-        },
+        outcome: failureOutcome(
+          invocation.input,
+          InvocationError.runtime(runtimeError.message),
+          sequence,
+        ),
       };
     }
     await recordRuntimeSuccess(invocationDirectory, response);
@@ -298,32 +294,26 @@ export class Flow<W> {
       value = JSON.parse(response.output);
     } catch (error) {
       return {
-        outcome: {
-          ok: false,
-          failure: new NodeFailure(
-            invocation.input,
-            InvocationError.invalidOutput(
-              `node returned invalid JSON: ${errorMessage(error)}`,
-            ),
-            sequence,
+        outcome: failureOutcome(
+          invocation.input,
+          InvocationError.invalidOutput(
+            `node returned invalid JSON: ${errorMessage(error)}`,
           ),
-        },
+          sequence,
+        ),
       };
     }
 
     const parsed = invocation.node._spec.outputSchema.safeParse(value);
     if (!parsed.success) {
       return {
-        outcome: {
-          ok: false,
-          failure: new NodeFailure(
-            invocation.input,
-            InvocationError.invalidOutput(
-              `node output did not match its TypeScript schema: ${parsed.error.message}`,
-            ),
-            sequence,
+        outcome: failureOutcome(
+          invocation.input,
+          InvocationError.invalidOutput(
+            `node output did not match its schema: ${parsed.error.message}`,
           ),
-        },
+          sequence,
+        ),
         parsedOutput: value,
       };
     }
@@ -351,15 +341,10 @@ export class Flow<W> {
 
   private registrationFor(invocation: AnyInvocation): HandlerRegistration<W> {
     const name = invocation.node.name;
-    const registration = this.#handlers.get(name);
+    const registration = this.#handlers.get(invocation.node);
     if (registration === undefined) {
       throw FlowError.invalidDefinition(
-        `node \`${name}\` has no \`after\` handler`,
-      );
-    }
-    if (registration.spec !== invocation.node._spec) {
-      throw FlowError.invalidDefinition(
-        `the invocation for node \`${name}\` did not use its registered node handle`,
+        `node \`${name}\` has no \`on\` handler`,
       );
     }
     return registration;
@@ -371,7 +356,14 @@ export function flow<W>(name: string): Flow<W> {
   return new Flow(name);
 }
 
-function validateNode(spec: NodeSpec<unknown>): void {
+function resolveRunOptions(options: FlowRunOptions): ResolvedFlowRunOptions {
+  return {
+    workingDirectoryPath: options.workingDirectory ?? ".",
+    debugDirectoryPath: options.debugDirectory ?? "debug",
+  };
+}
+
+function validateNode(spec: NodeSpec<unknown, unknown>): void {
   if (!/^[A-Za-z0-9_-]+$/.test(spec.name)) {
     throw FlowError.invalidDefinition(
       `node name \`${spec.name}\` must contain only ASCII letters, digits, \`-\`, or \`_\``,
@@ -412,9 +404,9 @@ async function recordRuntimeSuccess(
   directory: string,
   response: RuntimeResponse,
 ): Promise<void> {
-  await writeText(join(directory, "stdout.log"), response.stdout);
-  await writeText(join(directory, "stderr.log"), response.stderr);
-  await writeJsonLines(join(directory, "runtime-events.jsonl"), response.events);
+  await writeText(join(directory, "stdout.log"), response.stdout ?? "");
+  await writeText(join(directory, "stderr.log"), response.stderr ?? "");
+  await writeJsonLines(join(directory, "runtime-events.jsonl"), response.events ?? []);
   await writeText(join(directory, "response.raw.txt"), response.output);
 }
 

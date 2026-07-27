@@ -1,68 +1,56 @@
 import type { ZodType } from "zod";
 
-import { Access, Internet } from "./runtime.ts";
 import type { InvocationError } from "./error.ts";
+import { Access, Internet } from "./runtime.ts";
 
-export interface NodeSpec<O> {
+export interface NodeOptions<I, O> {
+  readonly name: string;
+  readonly input: ZodType<I>;
+  readonly output: ZodType<O>;
+  readonly prompt: string;
+  readonly access?: Access;
+  readonly internet?: boolean;
+}
+
+export interface NodeSpec<I, O> {
   readonly name: string;
   readonly prompt: string;
   readonly access: Access;
   readonly internet: Internet;
+  readonly inputSchema: ZodType<I>;
   readonly outputSchema: ZodType<O>;
 }
 
-/** A named agent operation with typed input and schema-validated output. */
+/** A named agent operation with schema-validated input and output. */
 export class Node<I, O> {
   /** @internal */
-  readonly _spec: NodeSpec<O>;
+  readonly _spec: NodeSpec<I, O>;
 
-  constructor(name: string, outputSchema: ZodType<O>, spec?: NodeSpec<O>) {
-    this._spec =
-      spec ??
-      Object.freeze({
-        name,
-        prompt: "",
-        access: Access.ReadOnly,
-        internet: Internet.Disabled,
-        outputSchema,
-      });
-  }
-
-  prompt(prompt: string): Node<I, O> {
-    return this.withSpec({ prompt });
-  }
-
-  access(access: Access): Node<I, O> {
-    return this.withSpec({ access });
-  }
-
-  internet(internet: Internet): Node<I, O> {
-    return this.withSpec({ internet });
+  /** @internal */
+  constructor(options: NodeOptions<I, O>) {
+    this._spec = Object.freeze({
+      name: options.name,
+      prompt: options.prompt,
+      access: options.access ?? Access.ReadOnly,
+      internet: options.internet === true ? Internet.Enabled : Internet.Disabled,
+      inputSchema: options.input,
+      outputSchema: options.output,
+    });
   }
 
   get name(): string {
     return this._spec.name;
   }
 
-  /** Returns another handle with the same identity, mirroring Rust's clone. */
-  clone(): Node<I, O> {
-    return new Node(this.name, this._spec.outputSchema, this._spec);
-  }
-
-  /** Creates one invocation without consuming the reusable node handle. */
-  with(input: I): NodeInvocation<I, O> {
+  /** Creates a request for this node without executing it. */
+  withInput(input: I): NodeInvocation<I, O> {
     return new NodeInvocation(this, input);
-  }
-
-  private withSpec(changes: Partial<NodeSpec<O>>): Node<I, O> {
-    const spec = Object.freeze({ ...this._spec, ...changes });
-    return new Node(spec.name, spec.outputSchema, spec);
   }
 }
 
 /** Creates a typed agent node with read-only, offline defaults. */
-export function node<I, O>(name: string, outputSchema: ZodType<O>): Node<I, O> {
-  return new Node(name, outputSchema);
+export function node<I, O>(options: NodeOptions<I, O>): Node<I, O> {
+  return new Node(options);
 }
 
 /** A typed request to invoke a particular node. */
@@ -79,42 +67,9 @@ export class NodeInvocation<I, O> {
 
 export type NodeOutcome<I, O> =
   | { readonly ok: true; readonly value: O }
-  | { readonly ok: false; readonly failure: NodeFailure<I> };
-
-/** A failed node invocation that retains its original input. */
-export class NodeFailure<I> {
-  readonly #input: I;
-  readonly #error: InvocationError;
-  readonly #invocation: number;
-
-  /** @internal */
-  constructor(input: I, error: InvocationError, invocation: number) {
-    this.#input = input;
-    this.#error = error;
-    this.#invocation = invocation;
-  }
-
-  input(): I {
-    return this.#input;
-  }
-
-  error(): InvocationError {
-    return this.#error;
-  }
-
-  invocation(): number {
-    return this.#invocation;
-  }
-
-  intoInput(): I {
-    return this.#input;
-  }
-
-  intoError(): InvocationError {
-    return this.#error;
-  }
-
-  intoParts(): readonly [I, InvocationError] {
-    return [this.#input, this.#error] as const;
-  }
-}
+  | {
+      readonly ok: false;
+      readonly error: InvocationError;
+      readonly input: I;
+      readonly invocation: number;
+    };

@@ -12,88 +12,64 @@ The project maps the Rust crates in `brain` to npm workspaces:
   installed Codex CLI.
 
 Unlike Rust, TypeScript types do not exist at runtime. Each node therefore
-receives a Zod schema explicitly; the schema provides both output validation and
-the JSON Schema sent to an agent runtime.
+receives Zod input and output schemas. They infer the node's types, validate its
+values, and provide the JSON Schema sent to an agent runtime.
 
 ## Example
 
 ```ts
 import { z } from "zod";
 
-import {
-  Access,
-  Internet,
-  RunConfig,
-  complete,
-  fail,
-  flow,
-  next,
-  node,
-} from "brain-js";
+import { complete, fail, flow, next, node } from "brain-js";
 import { CodexRuntime } from "brain-js-codex";
 
-interface ResearchInput {
-  topic: string;
-}
-
-const researchResult = z.object({
-  finding: z.string(),
-  needsAnalysis: z.boolean(),
+const research = node({
+  name: "research",
+  input: z.object({ topic: z.string() }),
+  output: z.object({
+    finding: z.string(),
+    needsAnalysis: z.boolean(),
+  }),
+  prompt: "Research the supplied topic and return the most important finding.",
+  internet: true,
 });
 
-interface AnalysisInput {
-  finding: string;
-}
-
-const analysisResult = z.object({ report: z.string() });
-
-const research = node<ResearchInput, z.infer<typeof researchResult>>(
-  "research",
-  researchResult,
-)
-  .prompt("Research the supplied topic and return the most important finding.")
-  .access(Access.ReadOnly)
-  .internet(Internet.Enabled);
-const analyze = node<AnalysisInput, z.infer<typeof analysisResult>>(
-  "analyze",
-  analysisResult,
-)
-  .prompt("Analyze the supplied finding and produce a concise final report.")
-  .access(Access.ReadOnly);
+const analyze = node({
+  name: "analyze",
+  input: z.object({ finding: z.string() }),
+  output: z.object({ report: z.string() }),
+  prompt: "Analyze the supplied finding and produce a concise final report.",
+});
 
 const run = await flow<string>("investigate")
-  .beginsWith(research.with({ topic: "typed agent workflows" }))
-  .after(research, (outcome) => {
-    if (!outcome.ok) return fail(outcome.failure.intoError());
-    if (!outcome.value.needsAnalysis) return complete(outcome.value.finding);
-    return next(analyze.with({ finding: outcome.value.finding }));
+  .startWith(research.withInput({ topic: "typed agent workflows" }))
+  .on(research, (result) => {
+    if (!result.ok) return fail(result.error);
+    if (!result.value.needsAnalysis) return complete(result.value.finding);
+    return next(analyze.withInput({ finding: result.value.finding }));
   })
-  .after(analyze, (outcome) =>
-    outcome.ok
-      ? complete(outcome.value.report)
-      : fail(outcome.failure.intoError()),
+  .on(analyze, (result) =>
+    result.ok ? complete(result.value.report) : fail(result.error),
   )
-  .runWith(
-    new CodexRuntime(),
-    new RunConfig()
-      .workingDirectory(".")
-      .debugDirectory("debug"),
-  );
+  .run(new CodexRuntime(), {
+    workingDirectory: ".",
+    debugDirectory: "debug",
+  });
 
 console.log(run.output);
 ```
 
-Every node has one `.after` function. It receives a discriminated outcome that
-contains either the typed output or a `NodeFailure` retaining the original
-input. Sending that input back to the same node is an ordinary transition:
+Every node has one `.on` handler. It receives a discriminated result containing
+either the typed output or the error, original input, and invocation number.
+Sending that input back to the same node is an ordinary transition:
 
 ```ts
-.after(research, (outcome) => {
-  if (outcome.ok) return complete(outcome.value);
-  if (outcome.failure.error().isInvalidOutput()) {
-    return next(research.with(outcome.failure.intoInput()));
+.on(research, (result) => {
+  if (result.ok) return complete(result.value);
+  if (result.error.kind === "invalid_output") {
+    return next(research.withInput(result.input));
   }
-  return fail(outcome.failure.intoError());
+  return fail(result.error);
 })
 ```
 
@@ -101,7 +77,7 @@ input. Sending that input back to the same node is an ordinary transition:
 
 - A flow begins with one typed node invocation.
 - Each invocation produces one schema-validated JSON result or one failure.
-- Its `.after` function returns `next(...)`, `complete(...)`, or `fail(...)`.
+- Its `.on` handler returns `next(...)`, `complete(...)`, or `fail(...)`.
 - `next(...)` selects exactly one invocation. There is no fan-out or join.
 - Routing to an earlier node is allowed; `brain-js` does not detect or limit
   loops.
@@ -112,7 +88,7 @@ input. Sending that input back to the same node is an ordinary transition:
 
 ## Debug traces
 
-`RunConfig.debugDirectory(...)` receives one directory per invocation:
+The configured `debugDirectory` receives one directory per invocation:
 
 ```text
 debug/
@@ -133,12 +109,12 @@ workspace deltas, or patches.
 
 ## Access settings
 
-`Access` and `Internet` are small, best-effort runtime settings. The Codex
-adapter maps them to corresponding CLI options. `Internet.Enabled` enables live
-web search rather than general network access for spawned commands. These
-settings are not a security boundary, and `brain-js` does not isolate
-workspaces, scrub environment variables, manage secrets, or compile tool
-policies.
+Node `access` and `internet` options are small, best-effort runtime settings.
+The Codex adapter maps them to corresponding CLI options. `internet: true`
+enables live web search rather than general network access for spawned
+commands. These settings are not a security boundary, and `brain-js` does not
+isolate workspaces, scrub environment variables, manage secrets, or compile
+tool policies.
 
 ## Development
 

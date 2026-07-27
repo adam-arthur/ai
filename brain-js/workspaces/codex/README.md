@@ -14,10 +14,10 @@ The executable defaults to `codex` on `PATH` and can be replaced for a custom
 installation:
 
 ```ts
-const runtime = new CodexRuntime().executable("/opt/bin/codex");
+const runtime = new CodexRuntime({ executable: "/opt/bin/codex" });
 ```
 
 This adapter is intentionally minimal and its access options are best effort,
-not a security boundary. `Internet.Enabled` exposes Codex's live web-search
-tool; it does not separately configure network access for arbitrary commands.
-
+not a security boundary. A node's `internet: true` option exposes Codex's live
+web-search tool; it does not separately configure network access for arbitrary
+commands.

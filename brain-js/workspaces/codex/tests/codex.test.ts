@@ -76,9 +76,9 @@ console.log(JSON.stringify({ type: "turn.completed" }));
   );
   await chmod(executable, 0o755);
 
-  const response = await new CodexRuntime()
-    .executable(executable)
-    .invoke(request(Access.ReadOnly, Internet.Disabled, temporary));
+  const response = await new CodexRuntime({ executable }).invoke(
+    request(Access.ReadOnly, Internet.Disabled, temporary),
+  );
 
   assert.equal(response.output, '{"answer":"ok"}');
   assert.deepEqual(response.events, [{ type: "turn.completed" }]);

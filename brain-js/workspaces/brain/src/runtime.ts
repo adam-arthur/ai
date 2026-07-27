@@ -31,18 +31,11 @@ export interface RuntimeDiagnostics {
 }
 
 /** The observable result of a successful runtime invocation. */
-export class RuntimeResponse {
+export interface RuntimeResponse {
   readonly output: string;
-  readonly events: readonly unknown[];
-  readonly stdout: string;
-  readonly stderr: string;
-
-  constructor(output: string, diagnostics: RuntimeDiagnostics = {}) {
-    this.output = output;
-    this.events = diagnostics.events ?? [];
-    this.stdout = diagnostics.stdout ?? "";
-    this.stderr = diagnostics.stderr ?? "";
-  }
+  readonly events?: readonly unknown[];
+  readonly stdout?: string;
+  readonly stderr?: string;
 }
 
 /** A failed runtime invocation together with any observable diagnostics. */
@@ -57,10 +50,6 @@ export class RuntimeError extends Error {
     this.events = diagnostics.events ?? [];
     this.stdout = diagnostics.stdout ?? "";
     this.stderr = diagnostics.stderr ?? "";
-  }
-
-  withDiagnostics(diagnostics: RuntimeDiagnostics): RuntimeError {
-    return new RuntimeError(this.message, diagnostics);
   }
 }
 

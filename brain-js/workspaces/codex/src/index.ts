@@ -5,9 +5,9 @@ import { join } from "node:path";
 
 import {
   RuntimeError,
-  RuntimeResponse,
   type AgentRuntime,
   type RuntimeRequest,
+  type RuntimeResponse,
 } from "brain-js";
 
 import { commandArguments, parseEvents } from "./command.ts";
@@ -23,12 +23,8 @@ interface ProcessOutput {
 export class CodexRuntime implements AgentRuntime {
   readonly #executable: string;
 
-  constructor(executable = "codex") {
-    this.#executable = executable;
-  }
-
-  executable(executable: string): CodexRuntime {
-    return new CodexRuntime(executable);
+  constructor(options: { executable?: string } = {}) {
+    this.#executable = options.executable ?? "codex";
   }
 
   async invoke(request: RuntimeRequest): Promise<RuntimeResponse> {
@@ -89,7 +85,7 @@ export class CodexRuntime implements AgentRuntime {
       if (finalResponse.trim() === "") {
         throw new RuntimeError("Codex produced an empty final response", diagnostics);
       }
-      return new RuntimeResponse(finalResponse, diagnostics);
+      return { output: finalResponse, ...diagnostics };
     } finally {
       await rm(temporary, { force: true, recursive: true }).catch(() => undefined);
     }

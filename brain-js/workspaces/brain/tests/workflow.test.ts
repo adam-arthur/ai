@@ -9,9 +9,7 @@ import { z } from "zod";
 import {
   FlowError,
   FlowErrorKind,
-  RunConfig,
   RuntimeError,
-  RuntimeResponse,
   complete,
   fail,
   flow,
@@ -19,22 +17,22 @@ import {
   node,
   type AgentRuntime,
   type RuntimeRequest,
+  type RuntimeResponse,
 } from "brain-js";
 
-interface ResearchInput {
-  topic: string;
-}
+const researchInputSchema = z.object({ topic: z.string() });
 
 const researchResultSchema = z.object({
   finding: z.string(),
   needsAnalysis: z.boolean(),
 });
 
-interface AnalysisInput {
-  finding: string;
-}
-
+const analysisInputSchema = z.object({ finding: z.string() });
 const analysisResultSchema = z.object({ report: z.string() });
+
+function response(output: string): RuntimeResponse {
+  return { output };
+}
 
 class QueueRuntime implements AgentRuntime {
   readonly requests: RuntimeRequest[] = [];
@@ -72,41 +70,37 @@ test("runs heterogeneous nodes and completes with a typed value", async (t) => {
   const temporary = await temporaryDirectory(t);
   const debug = join(temporary, "debug");
   const runtime = new QueueRuntime([
-    new RuntimeResponse(
+    response(
       JSON.stringify({ finding: "typed flows are useful", needsAnalysis: true }),
     ),
-    new RuntimeResponse(JSON.stringify({ report: "ship the experiment" })),
+    response(JSON.stringify({ report: "ship the experiment" })),
   ]);
-  const research = node<ResearchInput, z.infer<typeof researchResultSchema>>(
-    "research",
-    researchResultSchema,
-  ).prompt("Research the topic.");
-  const analyze = node<AnalysisInput, z.infer<typeof analysisResultSchema>>(
-    "analyze",
-    analysisResultSchema,
-  ).prompt("Analyze the finding.");
-  const analyzeAfterResearch = analyze.clone();
+  const research = node({
+    name: "research",
+    input: researchInputSchema,
+    output: researchResultSchema,
+    prompt: "Research the topic.",
+  });
+  const analyze = node({
+    name: "analyze",
+    input: analysisInputSchema,
+    output: analysisResultSchema,
+    prompt: "Analyze the finding.",
+  });
 
   const run = await flow<string>("investigate")
-    .beginsWith(research.with({ topic: "agent workflows" }))
-    .after(research, (outcome) => {
-      if (!outcome.ok) return fail(outcome.failure.intoError());
+    .startWith(research.withInput({ topic: "agent workflows" }))
+    .on(research, (outcome) => {
+      if (!outcome.ok) return fail(outcome.error);
       if (outcome.value.needsAnalysis) {
-        return next(
-          analyzeAfterResearch.with({ finding: outcome.value.finding }),
-        );
+        return next(analyze.withInput({ finding: outcome.value.finding }));
       }
       return complete(outcome.value.finding);
     })
-    .after(analyze, (outcome) =>
-      outcome.ok ? complete(outcome.value.report) : fail(outcome.failure.intoError()),
+    .on(analyze, (outcome) =>
+      outcome.ok ? complete(outcome.value.report) : fail(outcome.error),
     )
-    .runWith(
-      runtime,
-      new RunConfig()
-        .workingDirectory(temporary)
-        .debugDirectory(debug),
-    );
+    .run(runtime, { workingDirectory: temporary, debugDirectory: debug });
 
   assert.equal(run.output, "ship the experiment");
   assert.equal(run.invocations, 2);
@@ -127,36 +121,33 @@ test("runs heterogeneous nodes and completes with a typed value", async (t) => {
   });
 });
 
-interface AttemptInput {
-  attempt: number;
-}
-
+const attemptInputSchema = z.object({ attempt: z.number() });
 const attemptOutputSchema = z.object({ answer: z.string() });
 
 test("routes a failed invocation back to the same node", async (t) => {
   const temporary = await temporaryDirectory(t);
   const debug = join(temporary, "debug");
   const runtime = new QueueRuntime([
-    new RuntimeResponse("not json"),
-    new RuntimeResponse(JSON.stringify({ answer: "recovered" })),
+    response("not json"),
+    response(JSON.stringify({ answer: "recovered" })),
   ]);
-  const research = node<AttemptInput, z.infer<typeof attemptOutputSchema>>(
-    "research",
-    attemptOutputSchema,
-  ).prompt("Return an answer.");
-  const retry = research.clone();
+  const research = node({
+    name: "research",
+    input: attemptInputSchema,
+    output: attemptOutputSchema,
+    prompt: "Return an answer.",
+  });
 
   const run = await flow<string>("retry-by-routing")
-    .beginsWith(research.with({ attempt: 1 }))
-    .after(research, (outcome) => {
+    .startWith(research.withInput({ attempt: 1 }))
+    .on(research, (outcome) => {
       if (outcome.ok) return complete(outcome.value.answer);
-      if (outcome.failure.error().isInvalidOutput()) {
-        const input = outcome.failure.intoInput();
-        return next(retry.with({ attempt: input.attempt + 1 }));
+      if (outcome.error.kind === "invalid_output") {
+        return next(research.withInput({ attempt: outcome.input.attempt + 1 }));
       }
-      return fail(outcome.failure.intoError());
+      return fail(outcome.error);
     })
-    .runWith(runtime, new RunConfig().debugDirectory(debug));
+    .run(runtime, { debugDirectory: debug });
 
   assert.equal(run.output, "recovered");
   assert.equal(run.invocations, 2);
@@ -167,25 +158,24 @@ test("routes a failed invocation back to the same node", async (t) => {
 test("delivers runtime failures to the handler with the original input", async (t) => {
   const temporary = await temporaryDirectory(t);
   const runtime = new QueueRuntime([new RuntimeError("model unavailable")]);
-  const research = node<AttemptInput, z.infer<typeof attemptOutputSchema>>(
-    "research",
-    attemptOutputSchema,
-  ).prompt("Return an answer.");
+  const research = node({
+    name: "research",
+    input: attemptInputSchema,
+    output: attemptOutputSchema,
+    prompt: "Return an answer.",
+  });
 
   await assert.rejects(
     flow<string>("failure")
-      .beginsWith(research.with({ attempt: 7 }))
-      .after(research, (outcome) => {
+      .startWith(research.withInput({ attempt: 7 }))
+      .on(research, (outcome) => {
         if (outcome.ok) return complete(outcome.value.answer);
-        assert.equal(outcome.failure.input().attempt, 7);
-        assert.equal(outcome.failure.invocation(), 1);
-        assert.equal(outcome.failure.error().isRuntime(), true);
-        return fail(outcome.failure.intoError());
+        assert.equal(outcome.input.attempt, 7);
+        assert.equal(outcome.invocation, 1);
+        assert.equal(outcome.error.kind, "runtime");
+        return fail(outcome.error);
       })
-      .runWith(
-        runtime,
-        new RunConfig().debugDirectory(join(temporary, "debug")),
-      ),
+      .run(runtime, { debugDirectory: join(temporary, "debug") }),
     (error: unknown) => {
       assert.equal(error instanceof FlowError, true);
       assert.equal((error as FlowError).kind, FlowErrorKind.Failed);
@@ -198,19 +188,18 @@ test("delivers runtime failures to the handler with the original input", async (
 test("rejects missing handlers before invoking the runtime", async (t) => {
   const temporary = await temporaryDirectory(t);
   const runtime = new QueueRuntime([]);
-  const research = node<AttemptInput, z.infer<typeof attemptOutputSchema>>(
-    "research",
-    attemptOutputSchema,
-  ).prompt("Return an answer.");
+  const research = node({
+    name: "research",
+    input: attemptInputSchema,
+    output: attemptOutputSchema,
+    prompt: "Return an answer.",
+  });
 
   await assert.rejects(
     flow<string>("invalid")
-      .beginsWith(research.with({ attempt: 1 }))
-      .runWith(
-        runtime,
-        new RunConfig().debugDirectory(join(temporary, "debug")),
-      ),
-    /no `after` handler/,
+      .startWith(research.withInput({ attempt: 1 }))
+      .run(runtime, { debugDirectory: join(temporary, "debug") }),
+    /no `on` handler/,
   );
   assert.equal(runtime.requests.length, 0);
 });
@@ -218,24 +207,49 @@ test("rejects missing handlers before invoking the runtime", async (t) => {
 test("records invalid inputs without invoking the runtime", async (t) => {
   const temporary = await temporaryDirectory(t);
   const runtime = new QueueRuntime([]);
-  const research = node<{ value: bigint }, z.infer<typeof attemptOutputSchema>>(
-    "research",
-    attemptOutputSchema,
-  ).prompt("Return an answer.");
+  const research = node({
+    name: "research",
+    input: z.object({ value: z.bigint() }),
+    output: attemptOutputSchema,
+    prompt: "Return an answer.",
+  });
 
   await assert.rejects(
     flow<string>("invalid-input")
-      .beginsWith(research.with({ value: 1n }))
-      .after(research, (outcome) => {
-        assert.equal(outcome.ok, false);
-        assert.equal(outcome.failure.error().isInvalidInput(), true);
-        return fail(outcome.failure.intoError());
+      .startWith(research.withInput({ value: 1n }))
+      .on(research, (outcome) => {
+        if (outcome.ok) throw new Error("expected invalid input");
+        assert.equal(outcome.error.kind, "invalid_input");
+        return fail(outcome.error);
       })
-      .runWith(
-        runtime,
-        new RunConfig().debugDirectory(join(temporary, "debug")),
-      ),
-    /failed to serialize node input/,
+      .run(runtime, { debugDirectory: join(temporary, "debug") }),
+    /failed to validate or serialize node input/,
+  );
+  assert.equal(runtime.requests.length, 0);
+});
+
+test("validates node inputs before invoking the runtime", async (t) => {
+  const temporary = await temporaryDirectory(t);
+  const runtime = new QueueRuntime([]);
+  const research = node({
+    name: "research",
+    input: attemptInputSchema,
+    output: attemptOutputSchema,
+    prompt: "Return an answer.",
+  });
+  const invalidInput = { attempt: "one" } as unknown as { attempt: number };
+
+  await assert.rejects(
+    flow<string>("invalid-input-schema")
+      .startWith(research.withInput(invalidInput))
+      .on(research, (outcome) => {
+        if (outcome.ok) throw new Error("expected invalid input");
+        assert.equal(outcome.error.kind, "invalid_input");
+        assert.equal(outcome.input, invalidInput);
+        return fail(outcome.error);
+      })
+      .run(runtime, { debugDirectory: join(temporary, "debug") }),
+    /node input did not match its schema/,
   );
   assert.equal(runtime.requests.length, 0);
 });
@@ -244,22 +258,24 @@ test("continues trace numbering from the highest existing prefix", async (t) => 
   const temporary = await temporaryDirectory(t);
   const debug = join(temporary, "debug");
   const runtime = new QueueRuntime([
-    new RuntimeResponse(JSON.stringify({ answer: "done" })),
-    new RuntimeResponse(JSON.stringify({ answer: "again" })),
+    response(JSON.stringify({ answer: "done" })),
+    response(JSON.stringify({ answer: "again" })),
   ]);
-  const research = node<AttemptInput, z.infer<typeof attemptOutputSchema>>(
-    "research",
-    attemptOutputSchema,
-  ).prompt("Return an answer.");
+  const research = node({
+    name: "research",
+    input: attemptInputSchema,
+    output: attemptOutputSchema,
+    prompt: "Return an answer.",
+  });
   const execute = (attempt: number) =>
     flow<string>("numbering")
-      .beginsWith(research.with({ attempt }))
-      .after(research, (outcome) =>
+      .startWith(research.withInput({ attempt }))
+      .on(research, (outcome) =>
         outcome.ok
           ? complete(outcome.value.answer)
-          : fail(outcome.failure.intoError()),
+          : fail(outcome.error),
       )
-      .runWith(runtime, new RunConfig().debugDirectory(debug));
+      .run(runtime, { debugDirectory: debug });
 
   await execute(1);
   await execute(2);
