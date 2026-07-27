@@ -1,0 +1,17 @@
+[package]
+name = "brain-codex"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Codex runtime adapter for brain"
+license.workspace = true
+
+[dependencies]
+brain = { path = "../.." }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+schemars.workspace = true
+serde.workspace = true
