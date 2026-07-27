@@ -4,21 +4,21 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-use crate::{AgentRuntime, FlowError, FlowFailure, InvocationError, Node, NodeFailure, NodeInvocation, RuntimeError, RuntimeRequest, RuntimeResponse, node::NodeSpec};
+use crate::{Access, AgentRuntime, FlowError, FlowFailure, Internet, InvocationError, RuntimeError, RuntimeRequest, RuntimeResponse, Step, StepFailure, node::{StepInvocation, StepSpec}};
 
-/// Creates an empty typed flow definition.
-pub fn flow<W>(name: impl Into<String>) -> Flow<W> {
-    Flow::new(name)
+/// Creates a typed flow builder.
+pub fn flow<W>(name: impl Into<String>) -> FlowBuilder<W> {
+    FlowBuilder::new(name)
 }
 
-/// Routes execution to one node invocation.
-pub fn next<W, I, O>(invocation: NodeInvocation<I, O>) -> Transition<W>
+/// Routes execution to one step with the supplied input.
+pub fn next<W, I, O>(step: Step<I, O>, input: I) -> Transition<W>
 where
     I: Serialize + Send + 'static,
     O: DeserializeOwned + JsonSchema + Send + 'static,
 {
     Transition {
-        kind: TransitionKind::Next(Box::new(TypedInvocation::from(invocation))),
+        kind: TransitionKind::Next(Box::new(TypedInvocation::from(StepInvocation::new(step, input)))),
     }
 }
 
@@ -104,87 +104,101 @@ pub struct Flow<W> {
     definition_errors: Vec<String>,
 }
 
-impl<W> Flow<W> {
+/// Builds a flow from typed step registrations.
+pub struct FlowBuilder<W> {
+    flow: Flow<W>,
+}
+
+impl<W> FlowBuilder<W> {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
-            initial: None,
-            handlers: BTreeMap::new(),
-            definition_errors: Vec::new(),
+            flow: Flow {
+                name: name.into(),
+                initial: None,
+                handlers: BTreeMap::new(),
+                definition_errors: Vec::new(),
+            },
         }
     }
 
-    /// Selects the first node invocation in the flow.
-    pub fn begins_with<I, O>(mut self, invocation: NodeInvocation<I, O>) -> Self
+    /// Selects the first step invocation in the flow.
+    pub fn begins_with<I, O>(mut self, step: Step<I, O>, input: I) -> Self
     where
         I: Serialize + Send + 'static,
         O: DeserializeOwned + JsonSchema + Send + 'static,
     {
-        if self.initial.is_some() {
-            self.definition_errors
+        if self.flow.initial.is_some() {
+            self.flow
+                .definition_errors
                 .push("a flow can only have one initial invocation".into());
         } else {
-            self.initial = Some(Box::new(TypedInvocation::from(invocation)));
+            self.flow.initial = Some(Box::new(TypedInvocation::from(StepInvocation::new(step, input))));
         }
         self
     }
 
-    /// Registers the function that handles a successful node invocation.
-    ///
-    /// Failures stop the flow unless an [`Self::after_error`] handler is
-    /// registered for this node.
-    pub fn after<I, O, F>(mut self, node: Node<I, O>, handler: F) -> Self
-    where
-        I: Serialize + Send + 'static,
-        O: DeserializeOwned + JsonSchema + Send + 'static,
-        F: Fn(O) -> Transition<W> + Send + Sync + 'static,
-    {
-        let name = node.spec.name;
-        if self.handlers.contains_key(name) {
-            self.definition_errors
-                .push(format!("node `{name}` has more than one `after` handler"));
-            return self;
+    /// Starts configuring one typed step in the flow.
+    pub fn node<I, O>(self, step: Step<I, O>) -> NodeBuilder<W, I, O> {
+        NodeBuilder {
+            flow: self,
+            step,
+            prompt: "",
+            access: Access::default(),
+            internet: Internet::default(),
+            error_handler: None,
         }
-        self.handlers.insert(
-            name.to_owned(),
-            HandlerRegistration {
-                spec: node.spec,
-                success_handler: Box::new(TypedSuccessHandler::<F, O> {
-                    handler,
-                    marker: PhantomData,
-                }),
-                default_error_handler: Box::new(TypedDefaultErrorHandler::<I> { marker: PhantomData }),
-                error_handler: None,
-            },
-        );
+    }
+
+    /// Finishes the definition and returns a runnable flow.
+    pub fn build(self) -> Flow<W> {
+        self.flow
+    }
+}
+
+/// Configures a step and its deterministic handlers.
+pub struct NodeBuilder<W, I, O> {
+    flow: FlowBuilder<W>,
+    step: Step<I, O>,
+    prompt: &'static str,
+    access: Access,
+    internet: Internet,
+    error_handler: Option<Box<dyn ErasedErrorHandler<W>>>,
+}
+
+impl<W, I, O> NodeBuilder<W, I, O>
+where
+    I: Serialize + Send + 'static,
+    O: DeserializeOwned + JsonSchema + Send + 'static,
+{
+    pub fn prompt(mut self, prompt: &'static str) -> Self {
+        self.prompt = prompt;
         self
     }
 
-    /// Registers an optional recovery function for a failed node invocation.
+    pub fn access(mut self, access: Access) -> Self {
+        self.access = access;
+        self
+    }
+
+    pub fn internet(mut self, internet: Internet) -> Self {
+        self.internet = internet;
+        self
+    }
+
+    /// Registers optional recovery behavior for failed invocations.
     ///
-    /// The corresponding [`Self::after`] handler must be registered first.
-    pub fn after_error<I, O, F>(mut self, node: Node<I, O>, handler: F) -> Self
+    /// Without a catch handler, a failure stops the flow.
+    pub fn catch<F>(mut self, handler: F) -> Self
     where
-        I: Serialize + Send + 'static,
-        O: DeserializeOwned + JsonSchema + Send + 'static,
-        F: Fn(NodeFailure<I>) -> Transition<W> + Send + Sync + 'static,
+        F: Fn(StepFailure<I>) -> Transition<W> + Send + Sync + 'static,
     {
-        let name = node.spec.name;
-        let Some(registration) = self.handlers.get_mut(name) else {
-            self.definition_errors.push(format!(
-                "node `{name}` has an `after_error` handler but no `after` handler"
+        if self.error_handler.is_some() {
+            self.flow.flow.definition_errors.push(format!(
+                "step `{}` has more than one `catch` handler",
+                self.step.spec.name
             ));
-            return self;
-        };
-        if registration.spec != node.spec {
-            self.definition_errors.push(format!(
-                "the `after_error` handler for node `{name}` did not use its registered node handle"
-            ));
-        } else if registration.error_handler.is_some() {
-            self.definition_errors
-                .push(format!("node `{name}` has more than one `after_error` handler"));
         } else {
-            registration.error_handler = Some(Box::new(TypedErrorHandler::<F, I> {
+            self.error_handler = Some(Box::new(TypedErrorHandler::<F, I> {
                 handler,
                 marker: PhantomData,
             }));
@@ -192,6 +206,49 @@ impl<W> Flow<W> {
         self
     }
 
+    /// Registers success behavior and closes this node definition.
+    pub fn then<F>(mut self, handler: F) -> FlowBuilder<W>
+    where
+        F: Fn(O) -> Transition<W> + Send + Sync + 'static,
+    {
+        let name = self.step.spec.name;
+        if self.flow.flow.handlers.contains_key(name) {
+            self.flow
+                .flow
+                .definition_errors
+                .push(format!("step `{name}` has more than one node definition"));
+            return self.flow;
+        }
+        self.flow.flow.handlers.insert(
+            name.to_owned(),
+            HandlerRegistration {
+                spec: NodeSpec {
+                    step: self.step.spec,
+                    prompt: self.prompt,
+                    access: self.access,
+                    internet: self.internet,
+                },
+                success_handler: Box::new(TypedSuccessHandler::<F, O> {
+                    handler,
+                    marker: PhantomData,
+                }),
+                default_error_handler: Box::new(TypedDefaultErrorHandler::<I> { marker: PhantomData }),
+                error_handler: self.error_handler.take(),
+            },
+        );
+        self.flow
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NodeSpec {
+    step: StepSpec,
+    prompt: &'static str,
+    access: Access,
+    internet: Internet,
+}
+
+impl<W> Flow<W> {
     /// Runs the flow in the current directory and writes traces beneath `debug`.
     pub async fn run<R>(self, runtime: &R) -> Result<FlowRun<W>, FlowError>
     where
@@ -212,10 +269,11 @@ impl<W> Flow<W> {
 
         loop {
             let registration = self.registration_for(current.as_ref())?;
+            let node = registration.spec;
             sequence += 1;
             run_invocations += 1;
 
-            let node_name = current.spec().name;
+            let node_name = node.step.name;
             let invocation_directory = config.debug_directory.join(format!("{sequence:03}-{node_name}"));
             fs::create_dir(&invocation_directory).map_err(|error| FlowError::io(&invocation_directory, error))?;
 
@@ -225,8 +283,8 @@ impl<W> Flow<W> {
                     "flow": self.name,
                     "node": node_name,
                     "invocation": sequence,
-                    "access": current.spec().access,
-                    "internet": current.spec().internet,
+                    "access": node.access,
+                    "internet": node.internet,
                     "working_directory": config.working_directory,
                 }),
             )?;
@@ -237,7 +295,7 @@ impl<W> Flow<W> {
             let erased_outcome = match current.input_json() {
                 Ok(input) => {
                     write_json(invocation_directory.join("input.json"), &input)?;
-                    let prompt = assemble_prompt(current.spec().prompt, &input)?;
+                    let prompt = assemble_prompt(node.prompt, &input)?;
                     write_text(invocation_directory.join("prompt.md"), &prompt)?;
 
                     let request = RuntimeRequest {
@@ -247,8 +305,8 @@ impl<W> Flow<W> {
                         prompt,
                         output_schema: schema,
                         working_directory: config.working_directory.clone(),
-                        access: current.spec().access,
-                        internet: current.spec().internet,
+                        access: node.access,
+                        internet: node.internet,
                     };
                     let response = runtime.invoke(request).await;
                     record_runtime_result(&invocation_directory, &response)?;
@@ -319,14 +377,15 @@ impl<W> Flow<W> {
     }
 
     fn registration_for(&self, invocation: &dyn ErasedInvocation) -> Result<&HandlerRegistration<W>, FlowError> {
-        let name = invocation.spec().name;
+        let step = invocation.step_spec();
+        let name = step.name;
         let registration = self
             .handlers
             .get(name)
-            .ok_or_else(|| FlowError::InvalidDefinition(format!("node `{name}` has no `after` handler")))?;
-        if registration.spec != *invocation.spec() {
+            .ok_or_else(|| FlowError::InvalidDefinition(format!("step `{name}` has no node definition")))?;
+        if registration.spec.step != *step {
             return Err(FlowError::InvalidDefinition(format!(
-                "the invocation for node `{name}` did not use its registered node handle"
+                "the invocation for step `{name}` did not use its registered step handle"
             )));
         }
         Ok(registration)
@@ -334,21 +393,22 @@ impl<W> Flow<W> {
 }
 
 fn validate_node(spec: &NodeSpec) -> Result<(), FlowError> {
-    if spec.name.is_empty()
+    if spec.step.name.is_empty()
         || !spec
+            .step
             .name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
         return Err(FlowError::InvalidDefinition(format!(
             "node name `{}` must contain only ASCII letters, digits, `-`, or `_`",
-            spec.name
+            spec.step.name
         )));
     }
     if spec.prompt.trim().is_empty() {
         return Err(FlowError::InvalidDefinition(format!(
             "node `{}` has an empty prompt",
-            spec.name
+            spec.step.name
         )));
     }
     Ok(())
@@ -403,7 +463,7 @@ fn record_runtime_result(directory: &Path, result: &Result<RuntimeResponse, Runt
 
 fn record_transition<W>(directory: &Path, transition: &Transition<W>) -> Result<(), FlowError> {
     let value = match &transition.kind {
-        TransitionKind::Next(invocation) => json!({ "type": "next", "node": invocation.spec().name }),
+        TransitionKind::Next(invocation) => json!({ "type": "next", "node": invocation.step_spec().name }),
         TransitionKind::Complete(_) => json!({ "type": "complete" }),
         TransitionKind::Fail(error) => json!({ "type": "fail", "error": error.message() }),
     };
@@ -477,7 +537,7 @@ where
 {
     fn handle(&self, failure: Box<dyn Any + Send>, node_name: &str) -> Result<Transition<W>, FlowError> {
         let failure = failure
-            .downcast::<NodeFailure<I>>()
+            .downcast::<StepFailure<I>>()
             .map_err(|_| FlowError::TypeMismatch(node_name.into()))?;
         Ok(fail(*failure))
     }
@@ -491,11 +551,11 @@ struct TypedErrorHandler<F, I> {
 impl<W, I, F> ErasedErrorHandler<W> for TypedErrorHandler<F, I>
 where
     I: Send + 'static,
-    F: Fn(NodeFailure<I>) -> Transition<W> + Send + Sync,
+    F: Fn(StepFailure<I>) -> Transition<W> + Send + Sync,
 {
     fn handle(&self, failure: Box<dyn Any + Send>, node_name: &str) -> Result<Transition<W>, FlowError> {
         let failure = failure
-            .downcast::<NodeFailure<I>>()
+            .downcast::<StepFailure<I>>()
             .map_err(|_| FlowError::TypeMismatch(node_name.into()))?;
         Ok((self.handler)(*failure))
     }
@@ -513,21 +573,21 @@ enum ErasedNodeOutcome {
 }
 
 trait ErasedInvocation: Send {
-    fn spec(&self) -> &NodeSpec;
+    fn step_spec(&self) -> &StepSpec;
     fn input_json(&self) -> Result<Value, serde_json::Error>;
     fn output_schema(&self) -> Value;
     fn into_outcome(self: Box<Self>, result: Result<String, InvocationError>, invocation: usize) -> ErasedNodeOutcome;
 }
 
 struct TypedInvocation<I, O> {
-    node: Node<I, O>,
+    step: Step<I, O>,
     input: I,
 }
 
-impl<I, O> From<NodeInvocation<I, O>> for TypedInvocation<I, O> {
-    fn from(invocation: NodeInvocation<I, O>) -> Self {
+impl<I, O> From<StepInvocation<I, O>> for TypedInvocation<I, O> {
+    fn from(invocation: StepInvocation<I, O>) -> Self {
         Self {
-            node: invocation.node,
+            step: invocation.step,
             input: invocation.input,
         }
     }
@@ -538,8 +598,8 @@ where
     I: Serialize + Send + 'static,
     O: DeserializeOwned + JsonSchema + Send + 'static,
 {
-    fn spec(&self) -> &NodeSpec {
-        &self.node.spec
+    fn step_spec(&self) -> &StepSpec {
+        &self.step.spec
     }
 
     fn input_json(&self) -> Result<Value, serde_json::Error> {
@@ -560,7 +620,7 @@ where
                         parsed_output: value,
                     },
                     Err(error) => ErasedNodeOutcome::Failure {
-                        failure: Box::new(NodeFailure::new(
+                        failure: Box::new(StepFailure::new(
                             input,
                             InvocationError::invalid_output(format!(
                                 "node output did not match its Rust type: {error}"
@@ -571,7 +631,7 @@ where
                     },
                 },
                 Err(error) => ErasedNodeOutcome::Failure {
-                    failure: Box::new(NodeFailure::new(
+                    failure: Box::new(StepFailure::new(
                         input,
                         InvocationError::invalid_output(format!("node returned invalid JSON: {error}")),
                         invocation,
@@ -580,7 +640,7 @@ where
                 },
             },
             Err(error) => ErasedNodeOutcome::Failure {
-                failure: Box::new(NodeFailure::new(input, error, invocation)),
+                failure: Box::new(StepFailure::new(input, error, invocation)),
                 parsed_output: None,
             },
         }

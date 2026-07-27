@@ -1,4 +1,4 @@
-use brain::{FlowError, Internet, complete, flow, next, node};
+use brain::{FlowError, Internet, complete, flow, next, step};
 use brain_codex::CodexRuntime;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -30,23 +30,29 @@ async fn main() -> Result<(), FlowError> {
         .nth(1)
         .unwrap_or_else(|| "typed agent workflows".into());
 
-    let research = node::<ResearchInput, ResearchResult>("research")
-        .prompt("Research the topic and return one important, well-supported finding.")
-        .internet(Internet::Enabled);
-    let analyze = node::<AnalysisInput, AnalysisResult>("analyze")
-        .prompt("Analyze the finding. Return a final report, or a focused follow-up topic if more research is needed.");
+    let research = step::<ResearchInput, ResearchResult>("research");
+    let analyze = step::<AnalysisInput, AnalysisResult>("analyze");
 
     let run = flow::<String>("investigate")
-        .begins_with(research.with(ResearchInput { topic }))
-        .after(research, move |result| {
-            next(analyze.with(AnalysisInput {
-                finding: result.finding,
-            }))
+        .begins_with(research, ResearchInput { topic })
+        .node(research)
+        .prompt("Research the topic and return one important, well-supported finding.")
+        .internet(Internet::Enabled)
+        .then(move |result| {
+            next(
+                analyze,
+                AnalysisInput {
+                    finding: result.finding,
+                },
+            )
         })
-        .after(analyze, move |result| match result.follow_up {
-            Some(topic) => next(research.with(ResearchInput { topic })),
+        .node(analyze)
+        .prompt("Analyze the finding. Return a final report, or a focused follow-up topic if more research is needed.")
+        .then(move |result| match result.follow_up {
+            Some(topic) => next(research, ResearchInput { topic }),
             None => complete(result.report),
         })
+        .build()
         .run(&CodexRuntime::new())
         .await?;
 

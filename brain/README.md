@@ -12,7 +12,7 @@ The project is a small workspace:
 ## Example
 
 ```rust,no_run
-use brain::{Access, Internet, RunConfig, complete, flow, next, node};
+use brain::{Access, Internet, RunConfig, complete, flow, next, step};
 use brain_codex::CodexRuntime;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -39,27 +39,30 @@ struct AnalysisResult {
 }
 
 # async fn example() -> Result<(), brain::FlowError> {
-let research = node::<ResearchInput, ResearchResult>("research")
+let research = step::<ResearchInput, ResearchResult>("research");
+let analyze = step::<AnalysisInput, AnalysisResult>("analyze");
+let run = flow::<String>("investigate")
+    .begins_with(research, ResearchInput {
+        topic: "typed agent workflows".into(),
+    })
+    .node(research)
     .prompt("Research the supplied topic and return the most important finding.")
     .access(Access::ReadOnly)
-    .internet(Internet::Enabled);
-let analyze = node::<AnalysisInput, AnalysisResult>("analyze")
-    .prompt("Analyze the supplied finding and produce a concise final report.")
-    .access(Access::ReadOnly);
-let run = flow::<String>("investigate")
-    .begins_with(research.with(ResearchInput {
-        topic: "typed agent workflows".into(),
-    }))
-    .after(research, move |result| {
+    .internet(Internet::Enabled)
+    .then(move |result| {
         if result.needs_analysis {
-            next(analyze.with(AnalysisInput {
+            next(analyze, AnalysisInput {
                 finding: result.finding,
-            }))
+            })
         } else {
             complete(result.finding)
         }
     })
-    .after(analyze, |result| complete(result.report))
+    .node(analyze)
+    .prompt("Analyze the supplied finding and produce a concise final report.")
+    .access(Access::ReadOnly)
+    .then(|result| complete(result.report))
+    .build()
     .run_with(
         &CodexRuntime::new(),
         RunConfig::new()
@@ -73,28 +76,30 @@ println!("{}", run.output);
 # }
 ```
 
-Every node has one `.after` function that receives its typed output. A failure
-stops the flow automatically unless the node has an `.after_error` function.
-The `NodeFailure` passed to that function still owns the original input, so
+Every node has one `.then` function that receives its typed output. A failure
+stops the flow automatically unless the node has an optional `.catch` function.
+The `StepFailure` passed to that function still owns the original input, so
 sending it back to the same node is an ordinary transition rather than a
 special retry:
 
 ```rust,ignore
-.after(research, complete)
-.after_error(research, move |failure| {
+.node(research)
+.prompt("Research the topic.")
+.catch(move |failure| {
     if failure.error().is_invalid_output() {
-        next(research_again.with(failure.into_input()))
+        next(research, failure.into_input())
     } else {
         fail(failure)
     }
 })
+.then(complete)
 ```
 
 ## Execution semantics
 
-- A flow begins with one typed node invocation.
+- A flow's `.begins_with(step, input)` selects one typed initial invocation.
 - Each invocation produces one typed JSON result or one failure.
-- Its `.after` function returns `next(...)`, `complete(...)`, or `fail(...)`.
+- Its `.then` function returns `next(...)`, `complete(...)`, or `fail(...)`.
 - `next(...)` selects exactly one invocation. There is no fan-out or join.
 - Routing to an earlier node is allowed; `brain` does not detect or limit loops.
 - There are no automatic retries, timeouts, cancellation, budgets, concurrency,

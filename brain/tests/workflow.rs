@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, sync::Mutex};
 
-use brain::{AgentRuntime, FlowError, RunConfig, RuntimeError, RuntimeRequest, RuntimeResponse, async_trait, complete, fail, flow, next, node};
+use brain::{AgentRuntime, FlowError, RunConfig, RuntimeError, RuntimeRequest, RuntimeResponse, async_trait, complete, fail, flow, next, step};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -61,22 +61,33 @@ async fn runs_heterogeneous_nodes_and_completes_with_a_typed_value() {
         )),
         Ok(RuntimeResponse::new(r#"{"report":"ship the experiment"}"#)),
     ]);
-    let research = node::<ResearchInput, ResearchResult>("research").prompt("Research the topic.");
-    let analyze = node::<AnalysisInput, AnalysisResult>("analyze").prompt("Analyze the finding.");
+    let research = step::<ResearchInput, ResearchResult>("research");
+    let analyze = step::<AnalysisInput, AnalysisResult>("analyze");
     let run = flow::<String>("investigate")
-        .begins_with(research.with(ResearchInput {
-            topic: "agent workflows".into(),
-        }))
-        .after(research, move |result| {
+        .begins_with(
+            research,
+            ResearchInput {
+                topic: "agent workflows".into(),
+            },
+        )
+        .node(research)
+        .prompt("Research the topic.")
+        .then(move |result| {
             if result.needs_analysis {
-                next(analyze.with(AnalysisInput {
-                    finding: result.finding,
-                }))
+                next(
+                    analyze,
+                    AnalysisInput {
+                        finding: result.finding,
+                    },
+                )
             } else {
                 complete(result.finding)
             }
         })
-        .after(analyze, |result| complete(result.report))
+        .node(analyze)
+        .prompt("Analyze the finding.")
+        .then(|result| complete(result.report))
+        .build()
         .run_with(
             &runtime,
             RunConfig::new()
@@ -109,26 +120,29 @@ struct AttemptOutput {
 }
 
 #[tokio::test]
-async fn a_failure_handler_can_route_to_the_same_node_as_an_ordinary_next_transition() {
+async fn a_catch_handler_can_route_to_the_same_node_as_an_ordinary_next_transition() {
     let temporary = tempfile::tempdir().unwrap();
     let debug = temporary.path().join("debug");
     let runtime = QueueRuntime::new([
         Ok(RuntimeResponse::new("not json")),
         Ok(RuntimeResponse::new(r#"{"answer":"recovered"}"#)),
     ]);
-    let research = node::<AttemptInput, AttemptOutput>("research").prompt("Return an answer.");
+    let research = step::<AttemptInput, AttemptOutput>("research");
     let run = flow::<String>("retry-by-routing")
-        .begins_with(research.with(AttemptInput { attempt: 1 }))
-        .after(research, |result| complete(result.answer))
-        .after_error(research, move |failure| {
+        .begins_with(research, AttemptInput { attempt: 1 })
+        .node(research)
+        .prompt("Return an answer.")
+        .catch(move |failure| {
             if failure.error().is_invalid_output() {
                 let mut input = failure.into_input();
                 input.attempt += 1;
-                next(research.with(input))
+                next(research, input)
             } else {
                 fail(failure)
             }
         })
+        .then(|result| complete(result.answer))
+        .build()
         .run_with(&runtime, RunConfig::new().debug_directory(&debug))
         .await
         .unwrap();
@@ -140,20 +154,23 @@ async fn a_failure_handler_can_route_to_the_same_node_as_an_ordinary_next_transi
 }
 
 #[tokio::test]
-async fn runtime_failures_reach_after_error_with_the_original_input() {
+async fn runtime_failures_reach_catch_with_the_original_input() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = QueueRuntime::new([Err(RuntimeError::new("model unavailable"))]);
-    let research = node::<AttemptInput, AttemptOutput>("research").prompt("Return an answer.");
+    let research = step::<AttemptInput, AttemptOutput>("research");
 
     let error = flow::<String>("failure")
-        .begins_with(research.with(AttemptInput { attempt: 7 }))
-        .after(research, |result| complete(result.answer))
-        .after_error(research, |failure| {
+        .begins_with(research, AttemptInput { attempt: 7 })
+        .node(research)
+        .prompt("Return an answer.")
+        .catch(|failure| {
             assert_eq!(failure.input().attempt, 7);
             assert_eq!(failure.invocation(), 1);
             assert!(failure.error().is_runtime());
             fail(failure)
         })
+        .then(|result| complete(result.answer))
+        .build()
         .run_with(
             &runtime,
             RunConfig::new().debug_directory(temporary.path().join("debug")),
@@ -166,14 +183,17 @@ async fn runtime_failures_reach_after_error_with_the_original_input() {
 }
 
 #[tokio::test]
-async fn failures_stop_the_flow_without_an_after_error_handler() {
+async fn failures_stop_the_flow_without_a_catch_handler() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = QueueRuntime::new([Err(RuntimeError::new("model unavailable"))]);
-    let research = node::<AttemptInput, AttemptOutput>("research").prompt("Return an answer.");
+    let research = step::<AttemptInput, AttemptOutput>("research");
 
     let error = flow::<String>("failure")
-        .begins_with(research.with(AttemptInput { attempt: 1 }))
-        .after(research, |_| panic!("the success handler must not run"))
+        .begins_with(research, AttemptInput { attempt: 1 })
+        .node(research)
+        .prompt("Return an answer.")
+        .then(|_| panic!("the success handler must not run"))
+        .build()
         .run_with(
             &runtime,
             RunConfig::new().debug_directory(temporary.path().join("debug")),
@@ -189,10 +209,11 @@ async fn failures_stop_the_flow_without_an_after_error_handler() {
 async fn rejects_missing_handlers_before_invoking_the_runtime() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = QueueRuntime::new([]);
-    let research = node::<AttemptInput, AttemptOutput>("research").prompt("Return an answer.");
+    let research = step::<AttemptInput, AttemptOutput>("research");
 
     let error = flow::<String>("invalid")
-        .begins_with(research.with(AttemptInput { attempt: 1 }))
+        .begins_with(research, AttemptInput { attempt: 1 })
+        .build()
         .run_with(
             &runtime,
             RunConfig::new().debug_directory(temporary.path().join("debug")),
@@ -201,20 +222,23 @@ async fn rejects_missing_handlers_before_invoking_the_runtime() {
         .unwrap_err();
 
     assert!(matches!(error, FlowError::InvalidDefinition(_)));
-    assert!(error.to_string().contains("no `after` handler"));
+    assert!(error.to_string().contains("no node definition"));
     assert!(runtime.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn rejects_a_differently_configured_copy_of_a_registered_node() {
+async fn rejects_a_different_step_with_the_same_name_as_the_registered_node() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = QueueRuntime::new([]);
-    let unconfigured = node::<AttemptInput, AttemptOutput>("research");
-    let configured = unconfigured.prompt("Return an answer.");
+    let initial = step::<AttemptInput, AttemptOutput>("research");
+    let registered = step::<AttemptInput, AttemptOutput>("research");
 
     let error = flow::<String>("invalid")
-        .begins_with(unconfigured.with(AttemptInput { attempt: 1 }))
-        .after(configured, |result| complete(result.answer))
+        .begins_with(initial, AttemptInput { attempt: 1 })
+        .node(registered)
+        .prompt("Return an answer.")
+        .then(|result| complete(result.answer))
+        .build()
         .run_with(
             &runtime,
             RunConfig::new().debug_directory(temporary.path().join("debug")),
@@ -223,6 +247,6 @@ async fn rejects_a_differently_configured_copy_of_a_registered_node() {
         .unwrap_err();
 
     assert!(matches!(error, FlowError::InvalidDefinition(_)));
-    assert!(error.to_string().contains("registered node handle"));
+    assert!(error.to_string().contains("registered step handle"));
     assert!(runtime.requests.lock().unwrap().is_empty());
 }

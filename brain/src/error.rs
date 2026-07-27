@@ -2,7 +2,7 @@ use std::{fmt, io, path::PathBuf};
 
 use thiserror::Error;
 
-use crate::node::NodeFailure;
+use crate::node::StepFailure;
 
 /// The category of a failed node invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,8 +117,8 @@ impl From<InvocationError> for FlowFailure {
     }
 }
 
-impl<I> From<NodeFailure<I>> for FlowFailure {
-    fn from(failure: NodeFailure<I>) -> Self {
+impl<I> From<StepFailure<I>> for FlowFailure {
+    fn from(failure: StepFailure<I>) -> Self {
         failure.into_error().into()
     }
 }

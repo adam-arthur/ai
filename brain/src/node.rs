@@ -1,96 +1,75 @@
 use std::{marker::PhantomData, sync::atomic::{AtomicU64, Ordering}};
 
-use crate::{Access, Internet, InvocationError};
+use crate::InvocationError;
 
-/// Creates a typed agent node with read-only, offline defaults.
+/// Creates a named, typed step handle.
 ///
-/// The name must be static so the resulting node remains [`Copy`].
-pub fn node<I, O>(name: &'static str) -> Node<I, O> {
-    Node::new(name)
+/// The name must be static so the resulting step remains [`Copy`].
+pub fn step<I, O>(name: &'static str) -> Step<I, O> {
+    Step::new(name)
 }
 
-static NEXT_NODE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_STEP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct NodeSpec {
+pub(crate) struct StepSpec {
     pub id: u64,
     pub name: &'static str,
-    pub prompt: &'static str,
-    pub access: Access,
-    pub internet: Internet,
 }
 
-/// A named agent operation with typed input and output.
+/// A named, typed routing identity in a flow.
 #[derive(Debug)]
-pub struct Node<I, O> {
-    pub(crate) spec: NodeSpec,
+pub struct Step<I, O> {
+    pub(crate) spec: StepSpec,
     marker: PhantomData<fn(I) -> O>,
 }
 
-impl<I, O> Copy for Node<I, O> {}
+impl<I, O> Copy for Step<I, O> {}
 
-impl<I, O> Clone for Node<I, O> {
+impl<I, O> Clone for Step<I, O> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<I, O> Node<I, O> {
+impl<I, O> Step<I, O> {
     pub fn new(name: &'static str) -> Self {
         Self {
-            spec: NodeSpec {
-                id: NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed),
+            spec: StepSpec {
+                id: NEXT_STEP_ID.fetch_add(1, Ordering::Relaxed),
                 name,
-                prompt: "",
-                access: Access::default(),
-                internet: Internet::default(),
             },
             marker: PhantomData,
         }
     }
 
-    /// Sets the static prompt used for every invocation of this node.
-    pub fn prompt(mut self, prompt: &'static str) -> Self {
-        self.spec.prompt = prompt;
-        self
-    }
-
-    pub fn access(mut self, access: Access) -> Self {
-        self.spec.access = access;
-        self
-    }
-
-    pub fn internet(mut self, internet: Internet) -> Self {
-        self.spec.internet = internet;
-        self
-    }
-
     pub fn name(&self) -> &str {
         self.spec.name
     }
-
-    /// Creates one invocation without consuming the reusable node handle.
-    pub fn with(&self, input: I) -> NodeInvocation<I, O> {
-        NodeInvocation { node: *self, input }
-    }
 }
 
-/// A typed request to invoke a particular node.
+/// A typed request to invoke a particular step.
 #[derive(Debug)]
-pub struct NodeInvocation<I, O> {
-    pub(crate) node: Node<I, O>,
+pub(crate) struct StepInvocation<I, O> {
+    pub(crate) step: Step<I, O>,
     pub(crate) input: I,
 }
 
-/// A failed node invocation that retains ownership of its original input.
+impl<I, O> StepInvocation<I, O> {
+    pub(crate) fn new(step: Step<I, O>, input: I) -> Self {
+        Self { step, input }
+    }
+}
+
+/// A failed step invocation that retains ownership of its original input.
 #[derive(Debug)]
-pub struct NodeFailure<I> {
+pub struct StepFailure<I> {
     input: I,
     error: InvocationError,
     invocation: usize,
 }
 
-impl<I> NodeFailure<I> {
+impl<I> StepFailure<I> {
     pub(crate) fn new(input: I, error: InvocationError, invocation: usize) -> Self {
         Self {
             input,
