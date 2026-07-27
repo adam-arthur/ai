@@ -1,4 +1,4 @@
-use std::{any::Any, collections::BTreeMap, fs, marker::PhantomData, path::{Path, PathBuf}, sync::Arc};
+use std::{any::Any, collections::BTreeMap, fs, marker::PhantomData, path::{Path, PathBuf}};
 
 use schemars::{JsonSchema, schema_for};
 use serde::{Serialize, de::DeserializeOwned};
@@ -136,16 +136,16 @@ impl<W> Flow<W> {
         O: DeserializeOwned + JsonSchema + Send + 'static,
         F: Fn(NodeOutcome<I, O>) -> Transition<W> + Send + Sync + 'static,
     {
-        let name = node.spec.name.clone();
-        if self.handlers.contains_key(&name) {
+        let name = node.spec.name;
+        if self.handlers.contains_key(name) {
             self.definition_errors
                 .push(format!("node `{name}` has more than one `after` handler"));
             return self;
         }
         self.handlers.insert(
-            name,
+            name.to_owned(),
             HandlerRegistration {
-                spec: Arc::clone(&node.spec),
+                spec: node.spec,
                 handler: Box::new(TypedHandler {
                     handler,
                     marker: PhantomData,
@@ -178,7 +178,7 @@ impl<W> Flow<W> {
             sequence += 1;
             run_invocations += 1;
 
-            let node_name = current.spec().name.clone();
+            let node_name = current.spec().name;
             let invocation_directory = config.debug_directory.join(format!("{sequence:03}-{node_name}"));
             fs::create_dir(&invocation_directory).map_err(|error| FlowError::io(&invocation_directory, error))?;
 
@@ -200,12 +200,12 @@ impl<W> Flow<W> {
             let erased_outcome = match current.input_json() {
                 Ok(input) => {
                     write_json(invocation_directory.join("input.json"), &input)?;
-                    let prompt = assemble_prompt(&current.spec().prompt, &input)?;
+                    let prompt = assemble_prompt(current.spec().prompt, &input)?;
                     write_text(invocation_directory.join("prompt.md"), &prompt)?;
 
                     let request = RuntimeRequest {
                         flow_name: self.name.clone(),
-                        node_name: node_name.clone(),
+                        node_name: node_name.to_owned(),
                         invocation: sequence,
                         prompt,
                         output_schema: schema,
@@ -234,7 +234,7 @@ impl<W> Flow<W> {
             if let Some(parsed_output) = &erased_outcome.parsed_output {
                 write_json(invocation_directory.join("response.json"), parsed_output)?;
             }
-            let transition = registration.handler.handle(erased_outcome.outcome, &node_name)?;
+            let transition = registration.handler.handle(erased_outcome.outcome, node_name)?;
             record_transition(&invocation_directory, &transition)?;
 
             match transition.kind {
@@ -270,12 +270,12 @@ impl<W> Flow<W> {
     }
 
     fn registration_for(&self, invocation: &dyn ErasedInvocation) -> Result<&HandlerRegistration<W>, FlowError> {
-        let name = &invocation.spec().name;
+        let name = invocation.spec().name;
         let registration = self
             .handlers
             .get(name)
             .ok_or_else(|| FlowError::InvalidDefinition(format!("node `{name}` has no `after` handler")))?;
-        if !Arc::ptr_eq(&registration.spec, invocation.spec()) {
+        if registration.spec != *invocation.spec() {
             return Err(FlowError::InvalidDefinition(format!(
                 "the invocation for node `{name}` did not use its registered node handle"
             )));
@@ -386,7 +386,7 @@ fn write_json_lines(path: impl Into<PathBuf>, values: &[Value]) -> Result<(), Fl
 }
 
 struct HandlerRegistration<W> {
-    spec: Arc<NodeSpec>,
+    spec: NodeSpec,
     handler: Box<dyn ErasedHandler<W>>,
 }
 
@@ -419,7 +419,7 @@ struct ErasedNodeOutcome {
 }
 
 trait ErasedInvocation: Send {
-    fn spec(&self) -> &Arc<NodeSpec>;
+    fn spec(&self) -> &NodeSpec;
     fn input_json(&self) -> Result<Value, serde_json::Error>;
     fn output_schema(&self) -> Value;
     fn into_outcome(self: Box<Self>, result: Result<String, InvocationError>, invocation: usize) -> ErasedNodeOutcome;
@@ -444,7 +444,7 @@ where
     I: Serialize + Send + 'static,
     O: DeserializeOwned + JsonSchema + Send + 'static,
 {
-    fn spec(&self) -> &Arc<NodeSpec> {
+    fn spec(&self) -> &NodeSpec {
         &self.node.spec
     }
 

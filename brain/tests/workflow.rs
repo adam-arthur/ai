@@ -63,14 +63,12 @@ async fn runs_heterogeneous_nodes_and_completes_with_a_typed_value() {
     ]);
     let research = node::<ResearchInput, ResearchResult>("research").prompt("Research the topic.");
     let analyze = node::<AnalysisInput, AnalysisResult>("analyze").prompt("Analyze the finding.");
-    let analyze_after_research = analyze.clone();
-
     let run = flow::<String>("investigate")
         .begins_with(research.with(ResearchInput {
             topic: "agent workflows".into(),
         }))
         .after(research, move |outcome| match outcome {
-            Ok(result) if result.needs_analysis => next(analyze_after_research.with(AnalysisInput {
+            Ok(result) if result.needs_analysis => next(analyze.with(AnalysisInput {
                 finding: result.finding,
             })),
             Ok(result) => complete(result.finding),
@@ -120,8 +118,6 @@ async fn a_failure_handler_can_route_to_the_same_node_as_an_ordinary_next_transi
         Ok(RuntimeResponse::new(r#"{"answer":"recovered"}"#)),
     ]);
     let research = node::<AttemptInput, AttemptOutput>("research").prompt("Return an answer.");
-    let retry = research.clone();
-
     let run = flow::<String>("retry-by-routing")
         .begins_with(research.with(AttemptInput { attempt: 1 }))
         .after(research, move |outcome| match outcome {
@@ -129,7 +125,7 @@ async fn a_failure_handler_can_route_to_the_same_node_as_an_ordinary_next_transi
             Err(failure) if failure.error().is_invalid_output() => {
                 let mut input = failure.into_input();
                 input.attempt += 1;
-                next(retry.with(input))
+                next(research.with(input))
             },
             Err(failure) => fail(failure.into_error()),
         })
@@ -188,5 +184,30 @@ async fn rejects_missing_handlers_before_invoking_the_runtime() {
 
     assert!(matches!(error, FlowError::InvalidDefinition(_)));
     assert!(error.to_string().contains("no `after` handler"));
+    assert!(runtime.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn rejects_a_differently_configured_copy_of_a_registered_node() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runtime = QueueRuntime::new([]);
+    let unconfigured = node::<AttemptInput, AttemptOutput>("research");
+    let configured = unconfigured.prompt("Return an answer.");
+
+    let error = flow::<String>("invalid")
+        .begins_with(unconfigured.with(AttemptInput { attempt: 1 }))
+        .after(configured, |outcome| match outcome {
+            Ok(result) => complete(result.answer),
+            Err(failure) => fail(failure.into_error()),
+        })
+        .run_with(
+            &runtime,
+            RunConfig::new().debug_directory(temporary.path().join("debug")),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, FlowError::InvalidDefinition(_)));
+    assert!(error.to_string().contains("registered node handle"));
     assert!(runtime.requests.lock().unwrap().is_empty());
 }

@@ -1,16 +1,21 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::{marker::PhantomData, sync::atomic::{AtomicU64, Ordering}};
 
 use crate::{Access, Internet, InvocationError};
 
 /// Creates a typed agent node with read-only, offline defaults.
-pub fn node<I, O>(name: impl Into<String>) -> Node<I, O> {
+///
+/// The name must be static so the resulting node remains [`Copy`].
+pub fn node<I, O>(name: &'static str) -> Node<I, O> {
     Node::new(name)
 }
 
-#[derive(Clone, Debug)]
+static NEXT_NODE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NodeSpec {
-    pub name: String,
-    pub prompt: String,
+    pub id: u64,
+    pub name: &'static str,
+    pub prompt: &'static str,
     pub access: Access,
     pub internet: Internet,
 }
@@ -18,57 +23,55 @@ pub(crate) struct NodeSpec {
 /// A named agent operation with typed input and output.
 #[derive(Debug)]
 pub struct Node<I, O> {
-    pub(crate) spec: Arc<NodeSpec>,
+    pub(crate) spec: NodeSpec,
     marker: PhantomData<fn(I) -> O>,
 }
 
+impl<I, O> Copy for Node<I, O> {}
+
 impl<I, O> Clone for Node<I, O> {
     fn clone(&self) -> Self {
-        Self {
-            spec: Arc::clone(&self.spec),
-            marker: PhantomData,
-        }
+        *self
     }
 }
 
 impl<I, O> Node<I, O> {
-    pub fn new(name: impl Into<String>) -> Self {
+    pub fn new(name: &'static str) -> Self {
         Self {
-            spec: Arc::new(NodeSpec {
-                name: name.into(),
-                prompt: String::new(),
+            spec: NodeSpec {
+                id: NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed),
+                name,
+                prompt: "",
                 access: Access::default(),
                 internet: Internet::default(),
-            }),
+            },
             marker: PhantomData,
         }
     }
 
-    pub fn prompt(mut self, prompt: impl Into<String>) -> Self {
-        Arc::make_mut(&mut self.spec).prompt = prompt.into();
+    /// Sets the static prompt used for every invocation of this node.
+    pub fn prompt(mut self, prompt: &'static str) -> Self {
+        self.spec.prompt = prompt;
         self
     }
 
     pub fn access(mut self, access: Access) -> Self {
-        Arc::make_mut(&mut self.spec).access = access;
+        self.spec.access = access;
         self
     }
 
     pub fn internet(mut self, internet: Internet) -> Self {
-        Arc::make_mut(&mut self.spec).internet = internet;
+        self.spec.internet = internet;
         self
     }
 
     pub fn name(&self) -> &str {
-        &self.spec.name
+        self.spec.name
     }
 
     /// Creates one invocation without consuming the reusable node handle.
     pub fn with(&self, input: I) -> NodeInvocation<I, O> {
-        NodeInvocation {
-            node: self.clone(),
-            input,
-        }
+        NodeInvocation { node: *self, input }
     }
 }
 

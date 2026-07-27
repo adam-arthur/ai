@@ -46,15 +46,13 @@ let research = node::<ResearchInput, ResearchResult>("research")
 let analyze = node::<AnalysisInput, AnalysisResult>("analyze")
     .prompt("Analyze the supplied finding and produce a concise final report.")
     .access(Access::ReadOnly);
-let analyze_after_research = analyze.clone();
-
 let run = flow::<String>("investigate")
     .begins_with(research.with(ResearchInput {
         topic: "typed agent workflows".into(),
     }))
     .after(research, move |outcome| match outcome {
         Ok(result) if result.needs_analysis => {
-            next(analyze_after_research.with(AnalysisInput {
+            next(analyze.with(AnalysisInput {
                 finding: result.finding,
             }))
         }

@@ -29,31 +29,29 @@ async fn main() -> Result<(), FlowError> {
     let topic = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "typed agent workflows".into());
+
     let research = node::<ResearchInput, ResearchResult>("research")
         .prompt("Research the topic and return one important, well-supported finding.")
         .internet(Internet::Enabled);
     let analyze = node::<AnalysisInput, AnalysisResult>("analyze")
         .prompt("Analyze the finding. Return a final report, or a focused follow-up topic if more research is needed.");
-    let analyze_after_research = analyze.clone();
-    let research_after_analysis = research.clone();
 
-    let runtime = CodexRuntime::new();
     let run = flow::<String>("investigate")
         .begins_with(research.with(ResearchInput { topic }))
         .after(research, move |outcome| match outcome {
-            Ok(result) => next(analyze_after_research.with(AnalysisInput {
+            Ok(result) => next(analyze.with(AnalysisInput {
                 finding: result.finding,
             })),
             Err(failure) => fail(failure.into_error()),
         })
         .after(analyze, move |outcome| match outcome {
             Ok(result) => match result.follow_up {
-                Some(topic) => next(research_after_analysis.with(ResearchInput { topic })),
+                Some(topic) => next(research.with(ResearchInput { topic })),
                 None => complete(result.report),
             },
             Err(failure) => fail(failure.into_error()),
         })
-        .run(&runtime)
+        .run(&CodexRuntime::new())
         .await?;
 
     println!("{}", run.output);
