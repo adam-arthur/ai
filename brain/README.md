@@ -57,11 +57,11 @@ let run = flow::<String>("investigate")
             }))
         }
         Ok(result) => complete(result.finding),
-        Err(failure) => fail(failure.into_error()),
+        Err(failure) => fail(failure),
     })
     .after(analyze, |outcome| match outcome {
         Ok(result) => complete(result.report),
-        Err(failure) => fail(failure.into_error()),
+        Err(failure) => fail(failure),
     })
     .run_with(
         &CodexRuntime::new(),
@@ -86,7 +86,7 @@ same node is an ordinary transition rather than a special retry:
     Err(failure) if failure.error().is_invalid_output() => {
         next(research_again.with(failure.into_input()))
     }
-    Err(failure) => fail(failure.into_error()),
+    Err(failure) => fail(failure),
 })
 ```
 

@@ -42,14 +42,14 @@ async fn main() -> Result<(), FlowError> {
             Ok(result) => next(analyze.with(AnalysisInput {
                 finding: result.finding,
             })),
-            Err(failure) => fail(failure.into_error()),
+            Err(failure) => fail(failure),
         })
         .after(analyze, move |outcome| match outcome {
             Ok(result) => match result.follow_up {
                 Some(topic) => next(research.with(ResearchInput { topic })),
                 None => complete(result.report),
             },
-            Err(failure) => fail(failure.into_error()),
+            Err(failure) => fail(failure),
         })
         .run(&CodexRuntime::new())
         .await?;

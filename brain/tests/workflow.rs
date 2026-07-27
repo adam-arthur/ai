@@ -72,11 +72,11 @@ async fn runs_heterogeneous_nodes_and_completes_with_a_typed_value() {
                 finding: result.finding,
             })),
             Ok(result) => complete(result.finding),
-            Err(failure) => fail(failure.into_error()),
+            Err(failure) => fail(failure),
         })
         .after(analyze, |outcome| match outcome {
             Ok(result) => complete(result.report),
-            Err(failure) => fail(failure.into_error()),
+            Err(failure) => fail(failure),
         })
         .run_with(
             &runtime,
@@ -127,7 +127,7 @@ async fn a_failure_handler_can_route_to_the_same_node_as_an_ordinary_next_transi
                 input.attempt += 1;
                 next(research.with(input))
             },
-            Err(failure) => fail(failure.into_error()),
+            Err(failure) => fail(failure),
         })
         .run_with(&runtime, RunConfig::new().debug_directory(&debug))
         .await
@@ -153,7 +153,7 @@ async fn runtime_failures_reach_the_same_after_handler_with_the_original_input()
                 assert_eq!(failure.input().attempt, 7);
                 assert_eq!(failure.invocation(), 1);
                 assert!(failure.error().is_runtime());
-                fail(failure.into_error())
+                fail(failure)
             },
         })
         .run_with(
@@ -198,7 +198,7 @@ async fn rejects_a_differently_configured_copy_of_a_registered_node() {
         .begins_with(unconfigured.with(AttemptInput { attempt: 1 }))
         .after(configured, |outcome| match outcome {
             Ok(result) => complete(result.answer),
-            Err(failure) => fail(failure.into_error()),
+            Err(failure) => fail(failure),
         })
         .run_with(
             &runtime,

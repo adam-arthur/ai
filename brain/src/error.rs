@@ -2,6 +2,8 @@ use std::{fmt, io, path::PathBuf};
 
 use thiserror::Error;
 
+use crate::node::NodeFailure;
+
 /// The category of a failed node invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InvocationErrorKind {
@@ -112,6 +114,12 @@ impl From<&str> for FlowFailure {
 impl From<InvocationError> for FlowFailure {
     fn from(error: InvocationError) -> Self {
         Self::new(error.to_string())
+    }
+}
+
+impl<I> From<NodeFailure<I>> for FlowFailure {
+    fn from(failure: NodeFailure<I>) -> Self {
+        failure.into_error().into()
     }
 }
 
