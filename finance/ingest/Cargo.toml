@@ -13,6 +13,7 @@ time = { workspace = true }
 log = { workspace = true }
 dotenvy = { workspace = true }
 serde = { version = "1.0.158", features = ["derive"] }
+serde_with = "3"
 async-trait = "0.1.68"
 reqwest = { version = "0.11.15", features = ["json"] }
 clap = { version = "4.1.11", features = ["derive"] }

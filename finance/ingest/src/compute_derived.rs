@@ -1,7 +1,12 @@
-use std::{fs, path::PathBuf};
+use std::{
+    collections::BTreeMap, fs::{self, File}, io::{BufReader, BufWriter, Write}, path::{Path, PathBuf}
+};
 
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use common::Stock;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     financials::{
@@ -46,8 +51,8 @@ struct ComputeDerivedOptions {
 pub async fn compute_derived() {
     let args = Cli::parse();
 
-    let derived_data_path: String = format!("{}/derived", get_app_data_path().as_path().display());
-    let derived_stock_data_path: String = format!("{}/stocks", derived_data_path);
+    let derived_data_path = get_app_data_path().join("derived");
+    let derived_stock_data_path = derived_data_path.join("stocks");
 
     log::debug!("{:#?}", args);
 
@@ -69,7 +74,7 @@ pub async fn compute_derived() {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 log::info!("Directory did not exist, nothing to remove")
             }
-            Err(_) => panic!("Error removing directory: {}", &derived_data_path),
+            Err(_) => panic!("Error removing directory: {}", derived_data_path.display()),
         }
     } else {
         log::info!("Compute Derived - Skipping deletion...");
@@ -100,10 +105,375 @@ pub async fn compute_derived() {
         log::info!("Compute Derived - Skipping stocks...");
     }
 
+    if options.update_meta {
+        log::info!("symbolToStockMeta - Populating...");
+        update_meta(&derived_data_path, &derived_stock_data_path)
+            .unwrap_or_else(|error| panic!("Failed to update derived metadata: {error:#}"));
+    } else {
+        log::info!("Derived Data - Skipping meta...");
+    }
+
     // const populateReport = {
     //     options,
     //     failedSymbols: []
     // }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StockMetaSource {
+    symbol: String,
+    company: Option<CompanyMetaSource>,
+    sector: Option<SectorMetaSource>,
+    #[serde(default)]
+    historical_prices: Vec<LatestPoint>,
+    cef_meta: Option<CefMetaSource>,
+    portfolio: Option<PortfolioMetaSource>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompanyMetaSource {
+    company_name: Option<String>,
+    description: Option<String>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SectorMetaSource {
+    sector_name: Option<String>,
+    industry_group_name: Option<String>,
+    industry_name: Option<String>,
+    sub_industry_name: Option<String>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LatestPoint {
+    date: Option<String>,
+    close_yield: Option<f64>,
+    close_price: Option<f64>,
+    nav_price: Option<f64>,
+    nav_premium: Option<f64>,
+    volume: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CefMetaSource {
+    name: Option<String>,
+    category: Option<String>,
+    strategy: Option<String>,
+    nav_price: Option<f64>,
+    leverage_ratio: Option<f64>,
+    distribution_rate_on_price: Option<f64>,
+    effective_duration_leverage_adjusted: Option<f64>,
+    expense_ratio: Option<f64>,
+    #[serde(rename = "ZScore1Yr")]
+    z_score_1yr: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortfolioMetaSource {
+    fund_info: Option<FundInfoMetaSource>,
+}
+
+#[derive(Deserialize)]
+struct FundInfoMetaSource {
+    history: Option<Value>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StockMeta {
+    symbol: String,
+    company: Option<CompanyMeta>,
+    sector: Option<SectorMetaSource>,
+    latest_point: Option<LatestPoint>,
+    cef_meta: Option<CefMeta>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompanyMeta {
+    company_name: Option<String>,
+    description: Option<String>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CefMeta {
+    name: Option<String>,
+    category: Option<String>,
+    strategy: Option<String>,
+    nav_price: Option<f64>,
+    leverage_ratio: Option<f64>,
+    distribution_rate_on_price: Option<f64>,
+    effective_duration_leverage_adjusted: Option<f64>,
+    expense_ratio: Option<f64>,
+    #[serde(rename = "ZScore1Yr")]
+    z_score_1yr: Option<f64>,
+    history: Option<Value>,
+}
+
+impl From<StockMetaSource> for StockMeta {
+    fn from(mut stock: StockMetaSource) -> Self {
+        let company = stock.company.map(|company| CompanyMeta {
+            company_name: non_empty(company.company_name),
+            description: non_empty(company.description),
+        });
+        let history = stock
+            .portfolio
+            .and_then(|portfolio| portfolio.fund_info)
+            .and_then(|fund_info| fund_info.history);
+        let cef_meta = stock.cef_meta.map(|cef_meta| CefMeta {
+            name: cef_meta.name,
+            category: cef_meta.category,
+            strategy: cef_meta.strategy,
+            nav_price: cef_meta.nav_price,
+            leverage_ratio: cef_meta.leverage_ratio,
+            distribution_rate_on_price: cef_meta.distribution_rate_on_price,
+            effective_duration_leverage_adjusted: cef_meta.effective_duration_leverage_adjusted,
+            expense_ratio: cef_meta.expense_ratio,
+            z_score_1yr: cef_meta.z_score_1yr,
+            history,
+        });
+
+        Self {
+            symbol: stock.symbol,
+            company,
+            sector: stock.sector,
+            latest_point: stock.historical_prices.pop(),
+            cef_meta,
+        }
+    }
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
+}
+
+fn update_meta(derived_data_path: &Path, derived_stock_data_path: &Path) -> Result<()> {
+    let symbol_to_stock_meta = populate_symbol_to_stock_meta(derived_stock_data_path)?;
+    let symbols = symbol_to_stock_meta.keys().cloned().collect::<Vec<_>>();
+
+    fs::create_dir_all(derived_data_path).with_context(|| {
+        format!(
+            "failed to create derived data directory {}",
+            derived_data_path.display()
+        )
+    })?;
+    write_pretty_json(
+        &derived_data_path.join("symbolToStockMeta.json"),
+        &symbol_to_stock_meta,
+    )?;
+    write_pretty_json(&derived_data_path.join("symbols.json"), &symbols)?;
+
+    Ok(())
+}
+
+fn populate_symbol_to_stock_meta(
+    derived_stock_data_path: &Path,
+) -> Result<BTreeMap<String, StockMeta>> {
+    if !derived_stock_data_path.is_dir() {
+        bail!(
+            "derived stock directory {} does not exist; run with --update-stocks first",
+            derived_stock_data_path.display()
+        );
+    }
+
+    let mut stock_paths = fs::read_dir(derived_stock_data_path)
+        .with_context(|| {
+            format!(
+                "failed to read derived stock directory {}",
+                derived_stock_data_path.display()
+            )
+        })?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<PathBuf>>>()?;
+    stock_paths.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "json")
+    });
+    stock_paths.sort();
+
+    let mut symbol_to_stock_meta = BTreeMap::new();
+    for stock_path in stock_paths {
+        let file = File::open(&stock_path)
+            .with_context(|| format!("failed to open {}", stock_path.display()))?;
+        let stock = serde_json::from_reader::<_, StockMetaSource>(BufReader::new(file))
+            .with_context(|| format!("failed to deserialize {}", stock_path.display()))?;
+        let stock_meta = StockMeta::from(stock);
+        symbol_to_stock_meta.insert(stock_meta.symbol.clone(), stock_meta);
+    }
+
+    Ok(symbol_to_stock_meta)
+}
+
+fn write_pretty_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, value)
+        .with_context(|| format!("failed to serialize {}", path.display()))?;
+    writer
+        .write_all(b"\n")
+        .with_context(|| format!("failed to finish writing {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn stock_meta_keeps_only_summary_fields_and_latest_point() {
+        let source = serde_json::from_value::<StockMetaSource>(json!({
+            "symbol": "EXAMPLE",
+            "company": {
+                "companyName": "Example Fund",
+                "description": "",
+                "website": "https://example.com"
+            },
+            "sector": {
+                "sectorName": "Financials",
+                "industryName": "Capital Markets",
+                "industryGics": 402030
+            },
+            "historicalPrices": [
+                { "date": "2024-01-01", "closePrice": 9.5, "volume": 10 },
+                {
+                    "date": "2024-01-02",
+                    "closeYield": 0.08,
+                    "closePrice": 10.0,
+                    "navPrice": 11.0,
+                    "navPremium": -0.09,
+                    "volume": 20,
+                    "openPrice": 9.75
+                }
+            ],
+            "cefMeta": {
+                "name": "Example Fund",
+                "category": "Equity",
+                "strategy": "Covered Call",
+                "navPrice": 11.0,
+                "leverageRatio": 0.2,
+                "distributionRateOnPrice": 0.08,
+                "effectiveDurationLeverageAdjusted": 4.2,
+                "expenseRatio": 0.01,
+                "ZScore1Yr": -1.5,
+                "ignored": true
+            },
+            "portfolio": {
+                "fundInfo": {
+                    "history": [{ "year": 2023, "return": 0.12 }]
+                }
+            },
+            "financials": { "ignored": true }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(StockMeta::from(source)).unwrap(),
+            json!({
+                "symbol": "EXAMPLE",
+                "company": { "companyName": "Example Fund" },
+                "sector": {
+                    "sectorName": "Financials",
+                    "industryName": "Capital Markets"
+                },
+                "latestPoint": {
+                    "date": "2024-01-02",
+                    "closeYield": 0.08,
+                    "closePrice": 10.0,
+                    "navPrice": 11.0,
+                    "navPremium": -0.09,
+                    "volume": 20
+                },
+                "cefMeta": {
+                    "name": "Example Fund",
+                    "category": "Equity",
+                    "strategy": "Covered Call",
+                    "navPrice": 11.0,
+                    "leverageRatio": 0.2,
+                    "distributionRateOnPrice": 0.08,
+                    "effectiveDurationLeverageAdjusted": 4.2,
+                    "expenseRatio": 0.01,
+                    "ZScore1Yr": -1.5,
+                    "history": [{ "year": 2023, "return": 0.12 }]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn update_meta_writes_deterministic_indexes() {
+        let test_root = temporary_test_path();
+        let derived_data_path = test_root.join("derived");
+        let derived_stock_data_path = derived_data_path.join("stocks");
+        fs::create_dir_all(&derived_stock_data_path).unwrap();
+        fs::write(
+            derived_stock_data_path.join("z.json"),
+            r#"{"symbol":"ZZZ","historicalPrices":[]}"#,
+        )
+        .unwrap();
+        fs::write(
+            derived_stock_data_path.join("a.json"),
+            r#"{"symbol":"AAA","historicalPrices":[]}"#,
+        )
+        .unwrap();
+
+        update_meta(&derived_data_path, &derived_stock_data_path).unwrap();
+
+        let symbols: Value =
+            serde_json::from_reader(File::open(derived_data_path.join("symbols.json")).unwrap())
+                .unwrap();
+        let stock_meta: Value = serde_json::from_reader(
+            File::open(derived_data_path.join("symbolToStockMeta.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(symbols, json!(["AAA", "ZZZ"]));
+        assert_eq!(
+            stock_meta,
+            json!({
+                "AAA": { "symbol": "AAA" },
+                "ZZZ": { "symbol": "ZZZ" }
+            })
+        );
+
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
+    fn missing_stock_directory_has_actionable_error() {
+        let missing_path = temporary_test_path().join("stocks");
+        let error = match populate_symbol_to_stock_meta(&missing_path) {
+            Ok(_) => panic!("missing stock directory unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("run with --update-stocks first"));
+    }
+
+    fn temporary_test_path() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "finance-update-meta-{}-{unique}",
+            std::process::id()
+        ))
+    }
 }
 
 // main()
