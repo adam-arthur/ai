@@ -38,31 +38,6 @@ async fn main() {
     let project_env_vars = load_env_vars();
     log::debug!("Environment Variables: {:?}", project_env_vars);
 
-    // TODO: Type cli args
-    // const _cliArgs = parseArgs<{
-    //     scriptNumber: number
-    //     parallelism: number
-
-    //     // For distributed execution. Control which actions taken
-    //     removeExisting: boolean
-    //     updateStocks: boolean
-    //     updateMeta: boolean
-    // }>(
-    //     // Remove. Todo: make a bit better
-    //     // '--project', './ingest/tsconfig.json', '--'
-    //     process.argv.filter(arg => arg.startsWith('-')), // TODO: Only works if arg has leading -
-    //     {
-    //         default: {
-    //             scriptNumber: 1,
-    //             parallelism: 1,
-
-    //             removeExisting: false,
-    //             updateStocks: false,
-    //             updateMeta: false,
-    //         }
-    //     }
-    // )
-
     ingest().await;
     compute_derived().await;
 }

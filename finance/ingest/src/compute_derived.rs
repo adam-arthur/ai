@@ -14,14 +14,6 @@ use crate::{
 #[command(version = "1.0")]
 #[command(about = "Compute derived data using raw data fetched from various apis")]
 struct Cli {
-    /// Script number to execute
-    #[arg(short = 's', long = "script-number", default_value_t = 1)]
-    script_number: u32,
-
-    /// Level of parallelism
-    #[arg(short = 'p', long = "parallelism", default_value_t = 1)]
-    parallelism: u32,
-
     /// Remove existing data
     #[arg(long = "remove-existing", default_value_t = false)]
     remove_existing: bool,
@@ -49,11 +41,6 @@ struct ComputeDerivedOptions {
 
     /// Whether to update metadata
     update_meta: bool,
-    // TODO: no need since can implement parallelism directly in rust
-    // CLI Args
-    // isSingleRun: _cliArgs.parallelism === 1,
-    // scriptNumber: _cliArgs.scriptNumber,
-    // parallelism: _cliArgs.parallelism,
 }
 
 pub async fn compute_derived() {

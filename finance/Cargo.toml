@@ -10,7 +10,3 @@ simple_logger = "5.1.0"
 time = { version = "0.3.44", features = ["parsing", "formatting"] }
 log = "0.4.28"
 dotenvy = "0.15.7"
-
-# cargo run -- --remove-existing --update-meta;
-# cargo run -- --script-number=1 --parallelism=1 --update-stocks
-# cargo run -- --remove-existing --update-meta --update-stocks
