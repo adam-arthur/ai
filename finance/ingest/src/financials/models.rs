@@ -113,7 +113,21 @@ impl TreasuryDuration {
 }
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(EnumIter, EnumString, Display, Debug, Serialize, Deserialize, Clone, Copy)]
+#[derive(
+    EnumIter,
+    EnumString,
+    Display,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
 pub enum Currency {
     CAD,
     EUR,
@@ -136,11 +150,21 @@ impl Currency {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ExchangeRate {
-    pub from: Currency,
-    pub to: Currency,
-    pub rate: f64,
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExchangeRateSnapshot {
+    pub as_of: String,
+    pub base: Currency,
+    pub rates: std::collections::BTreeMap<Currency, f64>,
+}
+
+impl ExchangeRateSnapshot {
+    #[allow(dead_code)]
+    pub fn rate(&self, from: Currency, to: Currency) -> Option<f64> {
+        let from_per_base = self.rates.get(&from)?;
+        let to_per_base = self.rates.get(&to)?;
+        Some(to_per_base / from_per_base)
+    }
 }
 
 // TODO: Pull from other project
