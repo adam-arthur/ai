@@ -475,6 +475,20 @@ where
     Ok(response.json::<T>().await?)
 }
 
+/// Fetches a text document from SEC.gov using the shared fair-access throttle and user agent.
+pub(super) async fn fetch_sec_text(url: &str) -> Result<String, YieldWatchError> {
+    SEC_API_RATE_LIMITER.until_ready().await;
+
+    Ok(HTTP
+        .get(url)
+        .header("User-Agent", SEC_USER_AGENT.as_str())
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
