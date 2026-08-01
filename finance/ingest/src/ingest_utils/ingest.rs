@@ -77,24 +77,10 @@ async fn populate_ffo(tradable_symbols: &[SymbolMeta]) {
 
 async fn populate_sectors(tradable_symbols: &[String]) {
     log::info!(
-        "Sectors - fetching data for {} symbols in chunks of {}...",
+        "Sectors - checking cached data for {} symbols...",
         tradable_symbols.len(),
-        INGEST_SETTINGS.sa_fetch_chunk_size,
     );
-    let chunked_symbols = tradable_symbols.chunks(INGEST_SETTINGS.sa_fetch_chunk_size as usize);
-
-    let chunked_symbols_len = chunked_symbols.len();
-
-    for (chunk_idx, chunk) in chunked_symbols.enumerate() {
-        log::debug!(
-            "Sectors - processing chunk {} of {}...",
-            chunk_idx + 1,
-            chunked_symbols_len
-        );
-
-        log::trace!("Sectors - Chunk - {:?}", chunk);
-        ensure_sectors(chunk).await;
-    }
+    ensure_sectors(tradable_symbols).await;
 }
 
 async fn populate_timeseries(tradable_symbols: &[SymbolMeta]) {

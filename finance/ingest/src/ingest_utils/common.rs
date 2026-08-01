@@ -24,6 +24,8 @@ pub trait EnsureDataParams<T> {
 #[async_trait]
 pub trait EnsureBatchedDataParams<T> {
     async fn get_fresh_data(&self, stale_data: &[String]) -> HashMap<String, T>;
+    fn get_batch_size(&self) -> usize;
+    fn get_data_name(&self) -> &str;
     fn get_symbols(&self) -> &[String];
     fn get_file_path(&self, symbol: &str) -> String;
     fn get_time_until_cache_is_stale(&self) -> Duration;
@@ -128,9 +130,13 @@ pub async fn ensure_batched_data<T>(params: &dyn EnsureBatchedDataParams<T>) -> 
 where
     T: Serialize + DeserializeOwned,
 {
+    let batch_size = params.get_batch_size();
+    let data_name = params.get_data_name();
+    assert!(batch_size > 0, "batch size must be greater than zero");
+
     let last_updated = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
     // TODO: handle None case
-    let stale_sector_symbols: Vec<String> = params
+    let stale_symbols: Vec<String> = params
         .get_symbols()
         .iter()
         .filter(|symbol| {
@@ -140,29 +146,45 @@ where
         .cloned()
         .collect();
 
-    if stale_sector_symbols.is_empty() {
-        log::trace!("ensure_data - cached data is up to date");
+    if stale_symbols.is_empty() {
+        log::debug!("{data_name} - all cached data is up to date");
         return false;
     }
 
-    log::trace!("ensure_data - cached data was not up to date, fetching new...");
-    let fresh_batched_data = params.get_fresh_data(&stale_sector_symbols).await;
-    for (symbol, data) in fresh_batched_data.into_iter() {
-        let path = params.get_file_path(&symbol);
-        write_json_atomic(
-            Path::new(&path),
-            &FileSystemData::<T> {
-                meta: DataMeta {
-                    last_updated: last_updated.clone(),
+    let batch_count = stale_symbols.len().div_ceil(batch_size);
+    log::debug!(
+        "{data_name} - found {} stale symbols across {} API batches...",
+        stale_symbols.len(),
+        batch_count
+    );
+
+    for (batch_idx, stale_batch) in stale_symbols.chunks(batch_size).enumerate() {
+        log::debug!(
+            "{data_name} - processing API batch {} of {} ({} symbols)...",
+            batch_idx + 1,
+            batch_count,
+            stale_batch.len()
+        );
+        log::trace!("{data_name} - API batch - {stale_batch:?}");
+
+        let fresh_batched_data = params.get_fresh_data(stale_batch).await;
+        for (symbol, data) in fresh_batched_data {
+            let path = params.get_file_path(&symbol);
+            write_json_atomic(
+                Path::new(&path),
+                &FileSystemData::<T> {
+                    meta: DataMeta {
+                        last_updated: last_updated.clone(),
+                    },
+                    value: data,
                 },
-                value: data,
-            },
-        )
-        .unwrap_or_else(|error| panic!("Failed to write cache file {path}: {error:#}"));
+            )
+            .unwrap_or_else(|error| panic!("Failed to write cache file {path}: {error:#}"));
+        }
     }
 
     // TODO: Parity with ensure_data method
-    !stale_sector_symbols.is_empty()
+    !stale_symbols.is_empty()
 }
 
 pub(crate) fn is_stale<T>(
@@ -263,7 +285,7 @@ pub const INGEST_SETTINGS: IngestSettings = IngestSettings {
 mod tests {
     use std::{
         sync::{
-            Arc, atomic::{AtomicUsize, Ordering}
+            Arc, Mutex, atomic::{AtomicUsize, Ordering}
         }, time::{SystemTime, UNIX_EPOCH}
     };
 
@@ -272,6 +294,46 @@ mod tests {
     struct OptionalParams {
         path: String,
         fetch_count: Arc<AtomicUsize>,
+    }
+
+    struct BatchedParams {
+        cache_dir: String,
+        symbols: Vec<String>,
+        fetched_batches: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[async_trait]
+    impl EnsureBatchedDataParams<String> for BatchedParams {
+        async fn get_fresh_data(&self, stale_data: &[String]) -> HashMap<String, String> {
+            self.fetched_batches
+                .lock()
+                .unwrap()
+                .push(stale_data.to_vec());
+            stale_data
+                .iter()
+                .map(|symbol| (symbol.clone(), format!("fresh-{symbol}")))
+                .collect()
+        }
+
+        fn get_batch_size(&self) -> usize {
+            3
+        }
+
+        fn get_data_name(&self) -> &str {
+            "Test data"
+        }
+
+        fn get_symbols(&self) -> &[String] {
+            &self.symbols
+        }
+
+        fn get_file_path(&self, symbol: &str) -> String {
+            format!("{}/{symbol}.json", self.cache_dir)
+        }
+
+        fn get_time_until_cache_is_stale(&self) -> Duration {
+            Duration::MAX
+        }
     }
 
     #[async_trait]
@@ -336,5 +398,60 @@ mod tests {
         );
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn batched_cache_compacts_stale_symbols_before_fetching() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let cache_dir = std::env::temp_dir().join(format!(
+            "finance-batched-cache-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&cache_dir).unwrap();
+
+        for symbol in ["A", "C", "F"] {
+            fs::write(
+                cache_dir.join(format!("{symbol}.json")),
+                serde_json::to_vec(&FileSystemData {
+                    meta: DataMeta {
+                        last_updated: OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+                    },
+                    value: format!("cached-{symbol}"),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        let fetched_batches = Arc::new(Mutex::new(Vec::new()));
+        let params = BatchedParams {
+            cache_dir: cache_dir.to_string_lossy().into_owned(),
+            symbols: ["A", "B", "C", "D", "E", "F", "G"]
+                .map(str::to_owned)
+                .to_vec(),
+            fetched_batches: fetched_batches.clone(),
+        };
+
+        assert!(ensure_batched_data(&params).await);
+        assert_eq!(
+            *fetched_batches.lock().unwrap(),
+            vec![
+                vec!["B".to_owned(), "D".to_owned(), "E".to_owned()],
+                vec!["G".to_owned()],
+            ]
+        );
+        for symbol in ["B", "D", "E", "G"] {
+            assert_eq!(
+                get_cached_data::<String>(&params.get_file_path(symbol))
+                    .unwrap()
+                    .value,
+                format!("fresh-{symbol}")
+            );
+        }
+
+        fs::remove_dir_all(cache_dir).unwrap();
     }
 }
