@@ -3,7 +3,6 @@ pub mod cefconnect_api;
 pub mod ecb_api;
 pub mod sec_api;
 pub mod seekingalpha_api;
-pub mod tmp_compute_ffo;
 pub mod treasury_api;
 
 use std::env;

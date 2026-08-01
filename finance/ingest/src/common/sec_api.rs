@@ -476,7 +476,7 @@ where
 }
 
 /// Fetches a text document from SEC.gov using the shared fair-access throttle and user agent.
-pub(super) async fn fetch_sec_text(url: &str) -> Result<String, YieldWatchError> {
+pub(crate) async fn fetch_sec_text(url: &str) -> Result<String, YieldWatchError> {
     SEC_API_RATE_LIMITER.until_ready().await;
 
     Ok(HTTP
@@ -493,7 +493,7 @@ pub(super) async fn fetch_sec_text(url: &str) -> Result<String, YieldWatchError>
 ///
 /// Filing exhibits are not necessarily UTF-8 HTML (supplemental reports are sometimes PDFs), so
 /// callers that archive source documents must not pass them through [`fetch_sec_text`].
-pub(super) async fn fetch_sec_document(
+pub(crate) async fn fetch_sec_document(
     url: &str,
 ) -> Result<(Vec<u8>, Option<String>), YieldWatchError> {
     SEC_API_RATE_LIMITER.until_ready().await;

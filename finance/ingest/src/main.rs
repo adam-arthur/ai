@@ -2,6 +2,7 @@ extern crate dotenvy;
 
 mod common;
 mod compute_derived;
+mod ffo;
 mod file_utils;
 mod financials;
 mod ingest_utils;
