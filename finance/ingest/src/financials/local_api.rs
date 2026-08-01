@@ -7,7 +7,7 @@ use crate::{
     common::alpaca_api::CorporateActions, ingest_utils::common::FileSystemData, meta_utils::get_app_data_path
 };
 
-use super::models::{PricePoint, Sector, SymbolMeta};
+use super::models::{Company, PricePoint, Sector, SymbolMeta};
 
 pub fn read_tradable_symbols() -> Result<Vec<SymbolMeta>> {
     read_tradable_symbols_from(get_app_data_path())
@@ -25,6 +25,15 @@ pub fn read_prices_from(data_path: &Path, symbol: &str) -> Result<Vec<PricePoint
         &data_path.join("prices").join(format!("{symbol}.json")),
     )?
     .value)
+}
+
+pub fn read_company_from(data_path: &Path, symbol: &str) -> Result<Option<Company>> {
+    let path = data_path.join("companies").join(format!("{symbol}.json"));
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    Ok(deserialize_json_file::<FileSystemData<Option<Company>>>(&path)?.value)
 }
 
 // ADAMTODO: Rethink corporate action structure

@@ -1,8 +1,9 @@
 use futures::{StreamExt, stream};
 use time::OffsetDateTime;
 
+use crate::financials::models::SymbolMeta;
 use crate::ingest_utils::{
-    common::INGEST_SETTINGS, ensure_corporate_actions, ensure_data_folders, ensure_exchange_rates, ensure_prices, ensure_sectors, ensure_tradable_symbols, ensure_treasury_rates, is_valid_symbol
+    common::INGEST_SETTINGS, ensure_company, ensure_corporate_actions, ensure_data_folders, ensure_exchange_rates, ensure_prices, ensure_sectors, ensure_tradable_symbols, ensure_treasury_rates, is_valid_symbol
 };
 
 pub async fn ingest() {
@@ -24,11 +25,14 @@ pub async fn ingest() {
         .value
         .into_iter()
         .filter(|v| is_valid_symbol(&v.symbol))
-        .map(|v| v.symbol)
-        .collect::<Vec<String>>();
+        .collect::<Vec<SymbolMeta>>();
+    let symbols = tradable_symbols
+        .iter()
+        .map(|symbol_meta| symbol_meta.symbol.clone())
+        .collect::<Vec<_>>();
 
     tokio::join!(
-        populate_sectors(&tradable_symbols),
+        populate_sectors(&symbols),
         populate_timeseries(&tradable_symbols),
     );
 
@@ -79,15 +83,27 @@ async fn populate_sectors(tradable_symbols: &[String]) {
     }
 }
 
-async fn populate_timeseries(tradable_symbols: &[String]) {
-    log::info!("Ingesting: Timeseries, Corporate Actions...");
+async fn populate_timeseries(tradable_symbols: &[SymbolMeta]) {
+    log::info!("Ingesting: Companies, Timeseries, Corporate Actions...");
 
     // ADAMTODO: 10 may be too high.. limited to 10_000 requests/min
     stream::iter(tradable_symbols.iter().enumerate())
-        .for_each_concurrent(10, |(idx, symbol)| async move {
+        .for_each_concurrent(10, |(idx, symbol_meta)| async move {
+            let symbol = &symbol_meta.symbol;
             log::info!("Processing: {}...", symbol);
             let start_time = OffsetDateTime::now_utc();
-            tokio::join!(ensure_corporate_actions(symbol), ensure_prices(symbol),);
+            let company = async {
+                if let Some(cik) = &symbol_meta.cik {
+                    ensure_company(symbol, cik).await;
+                } else {
+                    log::debug!("{} - Company - no CIK, skipping...", symbol);
+                }
+            };
+            tokio::join!(
+                ensure_corporate_actions(symbol),
+                ensure_prices(symbol),
+                company
+            );
 
             let elapsed_time = OffsetDateTime::now_utc() - start_time;
             log::info!(

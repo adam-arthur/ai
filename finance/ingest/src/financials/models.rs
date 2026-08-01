@@ -510,94 +510,27 @@ pub struct Split {
                             // pub updated: Option<u64>,
 }
 
-// TODO: Convert empty string to null
+#[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Company {
-    pub symbol: String,       // "AAPL"
-    pub company_name: String, // "Apple Inc.",
-    pub exchange: String,     // "NASDAQ",
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub industry: Option<String>, // "Telecommunications Equipment",
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub website: Option<String>, // "http://www.apple.com",
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub description: Option<String>, //"Apple, Inc. engages in the design, manufacture, and marketing of mobile communication, media devices, personal computers, and portable digital music players. It operates through the following geographical segments: Americas, Europe, Greater China, Japan, and Rest of Asia Pacific. The Americas segment includes North and South America. The Europe segment consists of European countries, as well as India, the Middle East, and Africa. The Greater China segment comprises of China, Hong Kong, and Taiwan. The Rest of Asia Pacific segment includes Australia and Asian countries. The company was founded by Steven Paul Jobs, Ronald Gerald Wayne, and Stephen G. Wozniak on April 1, 1976 and is headquartered in Cupertino, CA.",
-
-    #[serde(
-        default,
-        alias = "CEO",
-        deserialize_with = "deserialize_optional_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub ceo: Option<String>, // "Timothy Donald Cook",
-    pub security_name: String, // "Apple Inc.",
-    pub issue_type: String,    //"cs",
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub sector: Option<String>, // "Electronic Technology",
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub primary_sic_code: Option<u64>, // 3663,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub employees: Option<u32>, // 132000,
-    pub tags: Vec<String>,     // ["Electronic Technology", "Telecommunications Equipment"],
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub address: Option<String>, // "One Apple Park Way",
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub address2: Option<String>, // null,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub state: Option<String>, // "CA",
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub city: Option<String>, // "Cupertino",
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub zip: Option<String>, // "95014-2083",
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub country: Option<String>, // "US",
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub phone: Option<String>, // "1.408.974.3123"
+    pub symbol: String,
+    pub company_name: String,
+    pub exchange: Option<String>,
+    pub industry: Option<String>,
+    pub website: Option<String>,
+    pub investor_website: Option<String>,
+    pub description: Option<String>,
+    pub primary_sic_code: Option<u64>,
+    pub address: Option<String>,
+    pub address2: Option<String>,
+    pub state: Option<String>,
+    pub city: Option<String>,
+    pub zip: Option<String>,
+    pub country: Option<String>,
+    pub phone: Option<String>,
+    pub state_of_incorporation: Option<String>,
+    pub fiscal_year_end: Option<String>,
 }
 
 fn deserialize_optional_float<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
@@ -607,16 +540,6 @@ where
     let value: Option<f64> =
         Deserialize::deserialize(deserializer).expect("Failed to deserialize into Option<f64>");
     Ok(value.and_then(|v| if v == 0.0 { None } else { Some(v) }))
-}
-
-fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value: Option<String> =
-        Deserialize::deserialize(deserializer).expect("Failed to deserialize into Option<f64>");
-    // log::debug!("VALUE {}", value);
-    Ok(value.and_then(|v| if v.is_empty() { None } else { Some(v) }))
 }
 
 #[derive(Serialize, Deserialize, Debug)]

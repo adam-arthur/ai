@@ -15,6 +15,7 @@ use std::fs::create_dir_all;
 
 use crate::meta_utils::get_app_data_path;
 
+use ensure_company::ensure_company;
 use ensure_corporate_actions::ensure_corporate_actions;
 use ensure_exchange_rates::ensure_exchange_rates;
 use ensure_prices::ensure_prices;

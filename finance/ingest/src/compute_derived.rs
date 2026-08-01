@@ -11,8 +11,8 @@ use serde_json::Value;
 use crate::{
     common::alpaca_api::CorporateActions, financials::{
         local_api::{
-            read_corporate_actions_from, read_prices_from, read_sector_from, read_tradable_symbols
-        }, models::{Exchange, PricePoint, SECTORID_TO_NAME, Sector, SymbolMeta}
+            read_company_from, read_corporate_actions_from, read_prices_from, read_sector_from, read_tradable_symbols
+        }, models::{Company, Exchange, PricePoint, SECTORID_TO_NAME, Sector, SymbolMeta}
     }, ingest_utils::is_valid_symbol, meta_utils::get_app_data_path
 };
 
@@ -152,6 +152,8 @@ struct DerivedStock {
     is_easy_to_borrow: bool,
     is_shortable: bool,
     is_fractionable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    company: Option<Company>,
     sector: DerivedSector,
     corporate_actions: Vec<CorporateActions>,
     historical_prices: Vec<PricePoint>,
@@ -337,7 +339,10 @@ impl From<StockMetaSource> for StockMeta {
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.is_empty())
+    value.and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_owned())
+    })
 }
 
 fn update_meta(derived_data_path: &Path, derived_stock_data_path: &Path) -> Result<()> {
@@ -591,6 +596,22 @@ mod tests {
                 "isEasyToBorrow": true,
                 "isShortable": true,
                 "isFractionable": true,
+                "company": {
+                    "symbol": "AAPL",
+                    "companyName": "Apple Inc.",
+                    "exchange": "Nasdaq",
+                    "industry": "Electronic Computers",
+                    "website": "https://www.apple.com",
+                    "description": "Apple makes consumer technology.",
+                    "primarySicCode": 3571,
+                    "address": "ONE APPLE PARK WAY",
+                    "state": "CA",
+                    "city": "CUPERTINO",
+                    "zip": "95014",
+                    "phone": "(408) 996-1010",
+                    "stateOfIncorporation": "CA",
+                    "fiscalYearEnd": "0927"
+                },
                 "sector": {
                     "symbol": "AAPL",
                     "sectorName": "Information Technology",
@@ -611,6 +632,19 @@ mod tests {
             })
         );
         assert!(!derived_stock_data_path.join(".AAPL.json.tmp").exists());
+
+        update_meta(&test_root.join("derived"), &derived_stock_data_path).unwrap();
+        let stock_meta: Value = serde_json::from_reader(
+            File::open(test_root.join("derived/symbolToStockMeta.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            stock_meta["AAPL"]["company"],
+            json!({
+                "companyName": "Apple Inc.",
+                "description": "Apple makes consumer technology."
+            })
+        );
 
         fs::remove_dir_all(test_root).unwrap();
     }
@@ -662,6 +696,7 @@ mod tests {
         fs::create_dir_all(test_root.join("prices")).unwrap();
         fs::create_dir_all(test_root.join("corporateActions")).unwrap();
         fs::create_dir_all(test_root.join("sectors")).unwrap();
+        fs::create_dir_all(test_root.join("companies")).unwrap();
         write_cached_value(
             &test_root.join("prices").join(format!("{symbol}.json")),
             json!([{
@@ -678,6 +713,25 @@ mod tests {
                 .join("corporateActions")
                 .join(format!("{symbol}.json")),
             json!([]),
+        );
+        write_cached_value(
+            &test_root.join("companies").join(format!("{symbol}.json")),
+            json!({
+                "symbol": symbol,
+                "companyName": "Apple Inc.",
+                "exchange": "Nasdaq",
+                "industry": "Electronic Computers",
+                "website": "https://www.apple.com",
+                "description": "Apple makes consumer technology.",
+                "primarySicCode": 3571,
+                "address": "ONE APPLE PARK WAY",
+                "state": "CA",
+                "city": "CUPERTINO",
+                "zip": "95014",
+                "phone": "(408) 996-1010",
+                "stateOfIncorporation": "CA",
+                "fiscalYearEnd": "0927"
+            }),
         );
         if include_sector {
             write_cached_value(
@@ -885,6 +939,7 @@ fn populate_derived_stock(
     let historical_prices = read_prices_from(data_path, &symbol)?;
     let corporate_actions = read_corporate_actions_from(data_path, &symbol)?;
     let sector = read_sector_from(data_path, &symbol)?;
+    let company = read_company_from(data_path, &symbol)?;
     let derived_stock = DerivedStock {
         cik,
         symbol: symbol.clone(),
@@ -893,6 +948,7 @@ fn populate_derived_stock(
         is_easy_to_borrow,
         is_shortable,
         is_fractionable,
+        company,
         sector: DerivedSector::from(sector),
         corporate_actions,
         historical_prices,

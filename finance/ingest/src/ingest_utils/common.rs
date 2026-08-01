@@ -86,6 +86,50 @@ where
     }
 }
 
+/// Get cached optional data or refresh it. A cached `null` is treated as missing so a
+/// temporary upstream gap does not become a long-lived negative cache entry.
+pub async fn ensure_optional_data<T>(
+    params: &dyn EnsureDataParams<Option<T>>,
+) -> EnsureDataResult<Option<T>>
+where
+    T: Serialize + DeserializeOwned,
+{
+    let cached_data = get_cached_data::<Option<T>>(&params.get_file_path());
+    let is_up_to_date = cached_data
+        .as_ref()
+        .is_some_and(|data| data.value.is_some())
+        && !is_stale(&cached_data, params.get_time_until_cache_is_stale());
+
+    if is_up_to_date {
+        let cached_data = cached_data.unwrap();
+        return EnsureDataResult {
+            value: cached_data.value,
+            was_cached: true,
+            last_updated: cached_data.meta.last_updated,
+        };
+    }
+
+    let fresh_data = FileSystemData::<Option<T>> {
+        meta: DataMeta {
+            last_updated: OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+        },
+        value: params
+            .get_fresh_data(cached_data.map(|data| data.value))
+            .await,
+    };
+
+    let _ = fs::write(
+        params.get_file_path(),
+        serde_json::to_string_pretty(&fresh_data).unwrap(),
+    );
+
+    EnsureDataResult {
+        value: fresh_data.value,
+        was_cached: false,
+        last_updated: fresh_data.meta.last_updated,
+    }
+}
+
 pub async fn ensure_batched_data<T>(params: &dyn EnsureBatchedDataParams<T>) -> bool
 where
     T: Serialize + DeserializeOwned,
@@ -225,3 +269,75 @@ pub const INGEST_SETTINGS: IngestSettings = IngestSettings {
     sa_fetch_chunk_size: 200,
     decimal_precision: 4,
 };
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{
+            Arc, atomic::{AtomicUsize, Ordering}
+        }, time::{SystemTime, UNIX_EPOCH}
+    };
+
+    use super::*;
+
+    struct OptionalParams {
+        path: String,
+        fetch_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl EnsureDataParams<Option<String>> for OptionalParams {
+        async fn get_fresh_data(&self, _cached_data: Option<Option<String>>) -> Option<String> {
+            self.fetch_count.fetch_add(1, Ordering::SeqCst);
+            Some("fresh".to_owned())
+        }
+
+        fn get_file_path(&self) -> String {
+            self.path.clone()
+        }
+
+        fn get_time_until_cache_is_stale(&self) -> Duration {
+            Duration::days(1)
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_cache_refreshes_null_then_reuses_value() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "finance-optional-cache-{}-{unique}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            serde_json::to_vec(&FileSystemData::<Option<String>> {
+                meta: DataMeta {
+                    last_updated: OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+                },
+                value: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let params = OptionalParams {
+            path: path.to_string_lossy().into_owned(),
+            fetch_count: fetch_count.clone(),
+        };
+
+        let refreshed = ensure_optional_data(&params).await;
+        assert_eq!(refreshed.value.as_deref(), Some("fresh"));
+        assert!(!refreshed.was_cached);
+
+        let cached = ensure_optional_data(&params).await;
+        assert_eq!(cached.value.as_deref(), Some("fresh"));
+        assert!(cached.was_cached);
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 1);
+
+        fs::remove_file(path).unwrap();
+    }
+}
