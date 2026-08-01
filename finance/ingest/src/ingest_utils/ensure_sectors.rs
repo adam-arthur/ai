@@ -22,7 +22,9 @@ pub async fn ensure_sectors(symbols: &[String]) -> bool {
             fetch_sector_quotes(stale_symbols).await
         }
         fn get_time_until_cache_is_stale(&self) -> Duration {
-            Duration::hours(u8::MAX as i64)
+            // GICS classifications rarely change. Keep an existing classification until it is
+            // explicitly removed so routine ingests only ask Seeking Alpha about new symbols.
+            Duration::MAX
         }
         fn get_symbols(&self) -> &[String] {
             self.symbols
