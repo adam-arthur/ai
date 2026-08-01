@@ -1,8 +1,8 @@
-//! Pipeline for locating, archiving, and extracting REIT FFO/AFFO source documents.
+//! Pipeline for extracting canonical, period-oriented REIT FFO/AFFO actual results.
 //!
-//! Extraction deliberately retains issuer terminology and raw table cells. FFO and AFFO are
-//! non-GAAP measures whose definitions vary, so downstream code must not silently combine values
-//! that have different labels or reconciliation methodologies.
+//! Source documents are cached separately. Persisted issuer data contains only numeric measures
+//! and parsed reconciliation components; HTML cells and other extraction internals never leak into
+//! the consumer-facing model.
 
 use std::{
     fs, path::{Path, PathBuf}
@@ -11,12 +11,14 @@ use std::{
 use anyhow::{Context, Result};
 use reqwest::Url;
 
+mod canonical;
 mod discovery;
 mod extract;
 mod models;
 
+use models::ExtractedFfoDocument;
 pub use models::{
-    ExtractedFfoDocument, FfoReconciliationRow, FfoSourceDocument, FfoValueSource, ReitFfoExtraction, ReitFfoSources, ReportedFfoValue
+    FfoAdjustment, FfoMeasure, FfoMeasures, FfoPeriodResult, FfoReconciliation, FfoReportingPeriod, FfoSourceDocument, ReitFfoData, ReitFfoSources
 };
 
 use crate::{common::sec_api::fetch_sec_document, meta_utils::get_app_data_path};
@@ -49,7 +51,7 @@ pub async fn fetch_reit_ffo_data(
     symbol: &str,
     cik: &str,
     sources_dir: impl AsRef<Path>,
-) -> Result<ReitFfoExtraction> {
+) -> Result<ReitFfoData> {
     let issuer_dir = issuer_source_dir(sources_dir.as_ref(), symbol);
     let sources = discovery::discover_reit_ffo_sources(cik, Some(&issuer_dir)).await?;
     fs::create_dir_all(&issuer_dir)
@@ -74,15 +76,12 @@ pub async fn fetch_reit_ffo_data(
         ));
     }
 
-    Ok(ReitFfoExtraction {
-        cik: sources.cik,
-        documents,
-    })
+    Ok(canonical::canonicalize(symbol, &sources.cik, documents))
 }
 
 /// Uses the repository's persistent source cache (`data/ffo/sources` in the default setup).
 #[allow(dead_code)]
-pub async fn fetch_reit_ffo_data_to_cache(symbol: &str, cik: &str) -> Result<ReitFfoExtraction> {
+pub async fn fetch_reit_ffo_data_to_cache(symbol: &str, cik: &str) -> Result<ReitFfoData> {
     fetch_reit_ffo_data(symbol, cik, get_app_data_path().join("ffo").join("sources")).await
 }
 
@@ -90,7 +89,7 @@ pub async fn fetch_reit_ffo_data_to_cache(symbol: &str, cik: &str) -> Result<Rei
 #[allow(dead_code)]
 pub async fn fetch_reit_ffo_data_batch_to_cache(
     issuers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
-) -> Result<Vec<ReitFfoExtraction>> {
+) -> Result<Vec<ReitFfoData>> {
     let mut results = Vec::new();
     for (symbol, cik) in issuers {
         results.push(fetch_reit_ffo_data_to_cache(symbol.as_ref(), cik.as_ref()).await?);
@@ -290,10 +289,11 @@ mod tests {
     }
 
     #[test]
-    fn extracts_totals_per_share_periods_definitions_and_reconciliation() {
+    fn extracts_typed_values_complete_periods_and_reconciliation() {
         let html = r#"
             <html><body>
               <p>We define Core FFO as NAREIT FFO excluding transaction costs.</p>
+              <p>Amounts in thousands, except per share data.</p>
               <table>
                 <tr><th></th><th>Three Months Ended March 31, 2026</th><th>Three Months Ended March 31, 2025</th></tr>
                 <tr><td>Net income attributable to common shareholders</td><td>$10,000</td><td>($2,000)</td></tr>
@@ -301,7 +301,6 @@ mod tests {
                 <tr><td>Core FFO attributable to common shareholders</td><td>$30,000</td><td>$16,000</td></tr>
                 <tr><td>Core FFO per diluted share</td><td>$1.25</td><td>$0.70</td></tr>
               </table>
-              <p>Amounts in thousands, except per share data.</p>
             </body></html>
         "#;
         let source = FfoSourceDocument {
@@ -314,35 +313,24 @@ mod tests {
             filing_index_url: "https://www.sec.gov/Archives/index.html".to_owned(),
         };
 
-        let (definitions, values) = extract_values_from_html(
-            html,
-            &source,
-            Path::new("data/ffo/sources/123/core-ffo.htm"),
-        );
+        let values = extract_values_from_html(html, &source);
 
-        assert_eq!(
-            definitions,
-            ["We define Core FFO as NAREIT FFO excluding transaction costs."]
-        );
         assert_eq!(values.len(), 4);
         assert_eq!(values[0].value_type, "total");
-        assert_eq!(values[0].raw_value, "$30,000");
-        assert_eq!(values[0].normalized_value, "30000");
+        assert_eq!(values[0].value, 30_000.0);
         assert_eq!(
-            values[0].reporting_period.as_deref(),
-            Some("Three Months Ended March 31, 2026")
+            values[0].reporting_period,
+            "Three Months Ended March 31, 2026"
         );
-        assert_eq!(values[0].units.as_deref(), Some("currency in thousands"));
+        assert_eq!(values[0].units.as_deref(), Some("thousands"));
         assert_eq!(values[0].reconciliation.len(), 3);
         assert_eq!(values[2].value_type, "perShare");
-        assert_eq!(values[2].normalized_value, "1.25");
-        assert_eq!(values[2].source.table_index, Some(0));
-        assert_eq!(values[2].source.row_index, Some(4));
+        assert_eq!(values[2].value, 1.25);
     }
 
     #[test]
     fn normalizes_accounting_numbers_without_inventing_values() {
-        assert_eq!(normalize_number("($1,234.50)"), Some("-1234.50".to_owned()));
+        assert_eq!(normalize_number("($1,234.50)"), Some(-1234.50));
         assert_eq!(
             combined_numeric_cell(
                 &[

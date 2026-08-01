@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// A filing document likely to contain a reported FFO or AFFO value or reconciliation.
+/// A filing document likely to contain a reported FFO reconciliation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FfoSourceDocument {
@@ -13,7 +13,6 @@ pub struct FfoSourceDocument {
     pub filing_index_url: String,
 }
 
-/// Source-document discovery results for one issuer.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReitFfoSources {
@@ -21,75 +20,134 @@ pub struct ReitFfoSources {
     pub documents: Vec<FfoSourceDocument>,
 }
 
-/// A source location that makes an extracted value traceable to both the immutable SEC URL and
-/// the archived local copy.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// A period for which an issuer reported actual results.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FfoValueSource {
-    pub document_url: String,
-    pub local_path: String,
-    pub filing_index_url: String,
-    pub accession_number: String,
-    pub filing_form: String,
-    pub filing_date: String,
-    pub table_index: Option<usize>,
-    pub row_index: Option<usize>,
+pub struct FfoReportingPeriod {
+    /// `quarter`, `sixMonths`, `nineMonths`, or `year`.
+    #[serde(rename = "type")]
+    pub period_type: String,
+    pub end_date: String,
 }
 
-/// One row in the issuer's reconciliation, retained verbatim after whitespace normalization.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// One issuer-defined FFO measure. Monetary totals are normalized to USD millions while
+/// per-share values remain USD per share.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FfoReconciliationRow {
-    pub label: String,
-    pub cells: Vec<String>,
+pub struct FfoMeasure {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reported_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diluted_per_share: Option<f64>,
 }
 
-/// A reported FFO/AFFO total or per-share amount.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReportedFfoValue {
-    /// Broad measure family (`ffo` or `affo`). See `companyLabel` for qualified variants such as
-    /// Core FFO or Normalized FFO; the broad family never replaces that exact issuer label.
-    pub metric: String,
-    /// The issuer's exact row/line label; this is the authoritative company-specific methodology
-    /// name and must be used when comparing values.
-    pub company_label: String,
-    /// `total` or `perShare`.
-    pub value_type: String,
-    /// Exact source spelling, including parentheses used to denote negative amounts.
-    pub raw_value: String,
-    /// A machine-friendly decimal string, without currency signs or grouping commas.
-    pub normalized_value: String,
-    pub reporting_period: Option<String>,
-    pub units: Option<String>,
-    /// Exact definition paragraphs found in the source document.
-    pub definitions: Vec<String>,
-    /// Rows from the nearest net-income starting point through the reported measure. This retains
-    /// the issuer's exact calculation rather than imposing a universal FFO formula.
-    pub reconciliation: Vec<FfoReconciliationRow>,
-    pub source: FfoValueSource,
+pub struct FfoMeasures {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nareit_ffo: Option<FfoMeasure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normalized_ffo: Option<FfoMeasure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub core_ffo: Option<FfoMeasure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adjusted_ffo: Option<FfoMeasure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pro_forma_ffo: Option<FfoMeasure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affo: Option<FfoMeasure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weighted_average_diluted_shares: Option<f64>,
 }
 
-/// Archive and extraction result for one downloaded source document.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExtractedFfoDocument {
-    #[serde(flatten)]
-    pub document: FfoSourceDocument,
-    pub local_path: String,
-    pub content_type: Option<String>,
-    pub byte_length: usize,
-    /// `extracted`, `noFfoValuesFound`, or `pdfTextUnavailable`.
-    pub extraction_status: String,
-    pub extraction_note: Option<String>,
-    pub definitions: Vec<String>,
-    pub values: Vec<ReportedFfoValue>,
+pub struct FfoAdjustment {
+    pub name: String,
+    pub value: f64,
 }
 
-/// Complete persisted result for an issuer.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Parsed constituent values from the reconciliation. Values are USD millions.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReitFfoExtraction {
+pub struct FfoReconciliation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub net_income: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub real_estate_depreciation_amortization: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub real_estate_impairments: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gain_loss_on_real_estate_sales: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unconsolidated_venture_adjustments: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub noncontrolling_interest_adjustments: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nareit_ffo: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normalized_ffo: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub core_ffo: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adjusted_ffo: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pro_forma_ffo: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affo: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub other_adjustments: Vec<FfoAdjustment>,
+}
+
+/// Canonical actual results for one reporting period.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfoPeriodResult {
+    pub period: FfoReportingPeriod,
+    pub filed_date: String,
+    pub currency: String,
+    pub amount_scale: String,
+    pub share_scale: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
+    pub measures: FfoMeasures,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciliation: Option<FfoReconciliation>,
+}
+
+/// Human-readable, deduplicated FFO data persisted for one issuer.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReitFfoData {
+    pub symbol: String,
     pub cik: String,
-    pub documents: Vec<ExtractedFfoDocument>,
+    pub periods: Vec<FfoPeriodResult>,
+}
+
+// The following types are deliberately internal. They retain just enough context to turn a
+// source table into the canonical model above and are never serialized into data/ffo/*.json.
+
+#[derive(Clone, Debug)]
+pub(super) struct ExtractedReconciliationRow {
+    pub label: String,
+    pub value: f64,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ReportedFfoValue {
+    pub variant: String,
+    pub company_label: String,
+    pub value_type: String,
+    pub value: f64,
+    pub reporting_period: String,
+    pub units: Option<String>,
+    pub reconciliation: Vec<ExtractedReconciliationRow>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ExtractedFfoDocument {
+    pub document: FfoSourceDocument,
+    pub values: Vec<ReportedFfoValue>,
 }
