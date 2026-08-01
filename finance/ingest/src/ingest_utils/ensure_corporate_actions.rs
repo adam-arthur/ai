@@ -1,10 +1,8 @@
-use std::ops::Add;
-
 use async_trait::async_trait;
 use time::Duration;
 
 use crate::{
-    common::alpaca_api::{CorporateActions, fetch_corporate_actions}, ingest_utils::common::{ensure_data, from_short_iso, to_short_iso}, meta_utils::get_app_data_path
+    common::alpaca_api::{CorporateActions, fetch_corporate_actions, merge_corporate_actions}, ingest_utils::common::ensure_data, meta_utils::get_app_data_path
 };
 
 use super::common::{EnsureDataParams, EnsureDataResult};
@@ -22,27 +20,17 @@ pub async fn ensure_corporate_actions(symbol: &String) -> EnsureDataResult<Vec<C
         ) -> Vec<CorporateActions> {
             match cached_data {
                 // If actions exist, use latest date, else arbitrary early date to fetch all
-                Some(mut cached_data) if !cached_data.is_empty() => {
+                Some(cached_data) if !cached_data.is_empty() => {
                     log::debug!(
                         "{} - Corporate Actions - fetching partial data...",
                         self.symbol
                     );
 
-                    let new_corporate_actions = fetch_corporate_actions(
-                        &self.symbol,
-                        &to_short_iso(
-                            &from_short_iso(&cached_data.last().unwrap().date)
-                                .add(Duration::days(1)), // Add one day to ensure no overlapping
-                        ),
-                    )
-                    .await;
+                    let new_corporate_actions =
+                        fetch_corporate_actions(&self.symbol, &cached_data.last().unwrap().date)
+                            .await;
 
-                    for new_corporate_actions in new_corporate_actions {
-                        // ADAMTODO: Do we need to refetch last date for race conditions?
-                        cached_data.push(new_corporate_actions)
-                    }
-
-                    cached_data
+                    merge_corporate_actions(cached_data, new_corporate_actions)
                 }
                 _ => {
                     log::debug!(

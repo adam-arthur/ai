@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet}, env, num::NonZeroU32, time::Duration
+    collections::{BTreeMap, HashMap, HashSet}, env, num::NonZeroU32, time::Duration
 };
 
 use governor::{Quota, RateLimiter};
@@ -1092,7 +1092,84 @@ pub async fn fetch_corporate_actions(symbol: &str, start: &str) -> Vec<Corporate
         }
     }
 
-    corporate_actions
+    canonicalize_corporate_actions(corporate_actions)
+}
+
+pub(crate) fn merge_corporate_actions(
+    mut cached: Vec<CorporateActions>,
+    fetched: Vec<CorporateActions>,
+) -> Vec<CorporateActions> {
+    let Some(first_fetched_date) = fetched.first().map(|actions| actions.date.as_str()) else {
+        return cached;
+    };
+
+    let boundary = cached.partition_point(|actions| actions.date.as_str() < first_fetched_date);
+    cached.truncate(boundary);
+    cached.extend(fetched);
+    cached
+}
+
+fn canonicalize_corporate_actions(
+    corporate_actions: Vec<CorporateActions>,
+) -> Vec<CorporateActions> {
+    let mut actions_by_date = BTreeMap::<String, CorporateActions>::new();
+
+    for actions in corporate_actions {
+        match actions_by_date.entry(actions.date.clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(actions);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                append_corporate_actions(entry.get_mut(), actions);
+            }
+        }
+    }
+
+    for actions in actions_by_date.values_mut() {
+        deduplicate_regular_cash_dividends(&mut actions.cash_dividends);
+    }
+
+    actions_by_date.into_values().collect()
+}
+
+fn append_corporate_actions(target: &mut CorporateActions, mut source: CorporateActions) {
+    macro_rules! append_actions {
+        ($($field:ident),+ $(,)?) => {
+            $(target.$field.append(&mut source.$field);)+
+        };
+    }
+
+    append_actions!(
+        cash_dividends,
+        cash_mergers,
+        forward_splits,
+        name_changes,
+        redemptions,
+        reverse_splits,
+        rights_distributions,
+        spin_offs,
+        stock_and_cash_mergers,
+        stock_dividends,
+        stock_mergers,
+        unit_splits,
+        worthless_removals,
+    );
+}
+
+fn deduplicate_regular_cash_dividends(dividends: &mut Vec<CashDividend>) {
+    let mut regular_dividends = HashSet::new();
+    dividends.retain(|dividend| {
+        dividend.special
+            || regular_dividends.insert((
+                dividend.rate.to_bits(),
+                dividend.foreign,
+                dividend.ex_date.clone(),
+                dividend.record_date.clone(),
+                dividend.payable_date.clone(),
+                dividend.due_bill_on_date.clone(),
+                dividend.due_bill_off_date.clone(),
+            ))
+    });
 }
 
 fn remove_into<V, T>(map: &mut HashMap<String, Vec<V>>, key: &String) -> Vec<T>
@@ -1104,4 +1181,93 @@ where
         .into_iter()
         .map(Into::into)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn canonicalization_deduplicates_only_regular_cash_dividends() {
+        let actions = serde_json::from_value::<Vec<CorporateActions>>(json!([
+            {
+                "date": "2025-05-15",
+                "cash_dividends": [
+                    { "rate": 0.25, "ex_date": "2025-05-15" },
+                    { "rate": 0.25, "ex_date": "2025-05-15" },
+                    {
+                        "rate": 0.25,
+                        "ex_date": "2025-05-15",
+                        "due_bill_on_date": "2025-05-16"
+                    },
+                    { "rate": 1.00, "special": true, "ex_date": "2025-05-15" }
+                ]
+            },
+            {
+                "date": "2025-05-15",
+                "cash_dividends": [
+                    { "rate": 1.00, "special": true, "ex_date": "2025-05-15" },
+                    { "rate": 2.00, "special": true, "ex_date": "2025-05-15" }
+                ]
+            }
+        ]))
+        .unwrap();
+
+        let canonical = canonicalize_corporate_actions(actions);
+
+        assert_eq!(canonical.len(), 1);
+        let dividends = &canonical[0].cash_dividends;
+        assert_eq!(dividends.len(), 5);
+        assert_eq!(
+            dividends.iter().filter(|dividend| dividend.special).count(),
+            3
+        );
+        assert_eq!(
+            dividends
+                .iter()
+                .filter(|dividend| !dividend.special)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn merge_replaces_the_refetched_date_and_keeps_earlier_history() {
+        let cached = serde_json::from_value::<Vec<CorporateActions>>(json!([
+            {
+                "date": "2025-05-14",
+                "cash_dividends": [{ "rate": 0.20, "ex_date": "2025-05-14" }]
+            },
+            {
+                "date": "2025-05-15",
+                "cash_dividends": [{ "rate": 0.25, "ex_date": "2025-05-15" }]
+            }
+        ]))
+        .unwrap();
+        let fetched = serde_json::from_value::<Vec<CorporateActions>>(json!([
+            {
+                "date": "2025-05-15",
+                "cash_dividends": [{ "rate": 0.30, "ex_date": "2025-05-15" }]
+            },
+            {
+                "date": "2025-05-16",
+                "cash_dividends": [{ "rate": 0.40, "ex_date": "2025-05-16" }]
+            }
+        ]))
+        .unwrap();
+
+        let merged = merge_corporate_actions(cached, fetched);
+
+        assert_eq!(
+            merged
+                .iter()
+                .map(|actions| actions.date.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2025-05-14", "2025-05-15", "2025-05-16"]
+        );
+        assert_eq!(merged[0].cash_dividends[0].rate, 0.20);
+        assert_eq!(merged[1].cash_dividends[0].rate, 0.30);
+    }
 }

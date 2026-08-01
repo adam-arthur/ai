@@ -710,7 +710,6 @@ mod tests {
                 "date": "2025-05-15",
                 "cash_dividends": [
                     { "rate": 0.25, "ex_date": "2025-05-15" },
-                    { "rate": 0.25, "ex_date": "2025-05-15" },
                     { "rate": 1.00, "special": true, "ex_date": "2025-05-15" }
                 ]
             }
@@ -1252,8 +1251,6 @@ fn derive_dividends(
             .then_with(|| a.record_date.cmp(&b.record_date))
             .then_with(|| a.payable_date.cmp(&b.payable_date))
     });
-    dividends.dedup_by(|a, b| same_dividend(a, b));
-
     if dividends.is_empty() {
         return Ok((dividends, None));
     }
@@ -1318,15 +1315,6 @@ fn normalize_dividend(
         record_date: dividend.record_date.clone(),
         payable_date: dividend.payable_date.clone(),
     })
-}
-
-fn same_dividend(a: &DerivedDividend, b: &DerivedDividend) -> bool {
-    a.rate == b.rate
-        && a.special == b.special
-        && a.foreign == b.foreign
-        && a.ex_date == b.ex_date
-        && a.record_date == b.record_date
-        && a.payable_date == b.payable_date
 }
 
 fn checked_split_ratio(new_rate: f64, old_rate: f64, ex_date: &str) -> Result<f64> {
