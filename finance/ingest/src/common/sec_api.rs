@@ -43,6 +43,50 @@ struct SecCompanySubmission {
     phone: Option<String>,
     state_of_incorporation: Option<String>,
     fiscal_year_end: Option<String>,
+    #[serde(default)]
+    filings: SecFilings,
+}
+
+#[derive(Default, Deserialize)]
+struct SecFilings {
+    #[serde(default)]
+    recent: SecRecentFilings,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SecRecentFilings {
+    #[serde(default)]
+    accession_number: Vec<String>,
+    #[serde(default)]
+    filing_date: Vec<String>,
+    #[serde(default)]
+    report_date: Vec<String>,
+    #[serde(default)]
+    acceptance_date_time: Vec<String>,
+    #[serde(default)]
+    form: Vec<String>,
+    #[serde(default)]
+    items: Vec<String>,
+    #[serde(default)]
+    primary_document: Vec<String>,
+    #[serde(default)]
+    primary_doc_description: Vec<String>,
+}
+
+/// An annual, quarterly, or current report listed in a company's recent SEC submissions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SecFiling {
+    pub accession_number: String,
+    pub filing_date: String,
+    pub report_date: Option<String>,
+    pub acceptance_date_time: Option<String>,
+    pub form: String,
+    pub items: Vec<String>,
+    pub primary_document: String,
+    pub primary_document_description: Option<String>,
+    pub filing_index_url: String,
+    pub primary_document_url: String,
 }
 
 #[derive(Deserialize)]
@@ -123,6 +167,20 @@ pub async fn fetch_company(symbol: &str, cik: &str) -> Result<Company, YieldWatc
     Ok(submission.into_company(symbol))
 }
 
+/// Fetches the 8-K, 10-Q, and 10-K filings in the SEC's recent-submissions index.
+///
+/// Amendments to those forms are included. The SEC keeps older submissions in separate files;
+/// this function intentionally returns only the `filings.recent` portion of the company response.
+#[allow(dead_code)]
+pub async fn fetch_recent_filings(cik: &str) -> Result<Vec<SecFiling>, YieldWatchError> {
+    let unpadded_cik = cik.trim_start_matches('0');
+    let padded_cik = format!("{:0>10}", unpadded_cik);
+    let submission =
+        sec_data::<SecCompanySubmission>(format!("/submissions/CIK{padded_cik}.json")).await?;
+
+    Ok(submission.filings.recent.into_filings(unpadded_cik))
+}
+
 /// Fetches reported, quarter-only revenue and EPS from the SEC Company Facts API.
 ///
 /// Company Facts also contains cumulative year-to-date observations. Those are excluded by
@@ -164,6 +222,70 @@ impl SecCompanyFacts {
 
         quarters.into_values().collect()
     }
+}
+
+impl SecRecentFilings {
+    fn into_filings(self, cik: &str) -> Vec<SecFiling> {
+        let Self {
+            accession_number,
+            filing_date,
+            report_date,
+            acceptance_date_time,
+            form,
+            items,
+            primary_document,
+            primary_doc_description,
+        } = self;
+
+        form.into_iter()
+            .enumerate()
+            .filter(|(_, form)| is_reit_source_form(form))
+            .filter_map(|(index, form)| {
+                let accession_number = accession_number.get(index)?.clone();
+                let filing_date = filing_date.get(index)?.clone();
+                let primary_document = primary_document.get(index)?.clone();
+                let accession_path = accession_number.replace('-', "");
+                let archive_base =
+                    format!("https://www.sec.gov/Archives/edgar/data/{cik}/{accession_path}");
+
+                Some(SecFiling {
+                    filing_index_url: format!("{archive_base}/{accession_number}-index.html"),
+                    primary_document_url: format!("{archive_base}/{primary_document}"),
+                    accession_number,
+                    filing_date,
+                    report_date: report_date.get(index).cloned().and_then(non_empty),
+                    acceptance_date_time: acceptance_date_time
+                        .get(index)
+                        .cloned()
+                        .and_then(non_empty),
+                    form,
+                    items: items
+                        .get(index)
+                        .map(|items| {
+                            items
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|item| !item.is_empty())
+                                .map(str::to_owned)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    primary_document,
+                    primary_document_description: primary_doc_description
+                        .get(index)
+                        .cloned()
+                        .and_then(non_empty),
+                })
+            })
+            .collect()
+    }
+}
+
+fn is_reit_source_form(form: &str) -> bool {
+    matches!(
+        form.strip_suffix("/A").unwrap_or(form),
+        "8-K" | "10-Q" | "10-K"
+    )
 }
 
 fn merge_concepts(
@@ -405,6 +527,53 @@ mod tests {
                 "fiscalYearEnd": "0927"
             })
         );
+    }
+
+    #[test]
+    fn sec_submission_maps_recent_reit_source_filings_and_urls() {
+        let submission = serde_json::from_value::<SecCompanySubmission>(json!({
+            "name": "Example REIT",
+            "filings": {
+                "recent": {
+                    "accessionNumber": [
+                        "0001234567-26-000010",
+                        "0001234567-26-000009",
+                        "0001234567-26-000008",
+                        "0001234567-26-000007"
+                    ],
+                    "filingDate": ["2026-05-01", "2026-04-30", "2026-04-29", "2026-04-28"],
+                    "reportDate": ["2026-03-31", "2026-03-31", "2025-12-31", ""],
+                    "acceptanceDateTime": [
+                        "2026-05-01T16:01:02.000Z",
+                        "2026-04-30T16:01:02.000Z",
+                        "2026-04-29T16:01:02.000Z",
+                        "2026-04-28T16:01:02.000Z"
+                    ],
+                    "form": ["8-K", "10-Q", "10-K/A", "4"],
+                    "items": ["2.02,9.01", "", "", ""],
+                    "primaryDocument": ["earnings.htm", "quarter.htm", "annual.htm", "form4.xml"],
+                    "primaryDocDescription": ["Earnings release", "10-Q", "", "FORM 4"]
+                }
+            }
+        }))
+        .unwrap();
+
+        let filings = submission.filings.recent.into_filings("1234567");
+
+        assert_eq!(filings.len(), 3);
+        assert_eq!(filings[0].form, "8-K");
+        assert_eq!(filings[0].items, ["2.02", "9.01"]);
+        assert_eq!(filings[0].report_date.as_deref(), Some("2026-03-31"));
+        assert_eq!(
+            filings[0].filing_index_url,
+            "https://www.sec.gov/Archives/edgar/data/1234567/000123456726000010/0001234567-26-000010-index.html"
+        );
+        assert_eq!(
+            filings[0].primary_document_url,
+            "https://www.sec.gov/Archives/edgar/data/1234567/000123456726000010/earnings.htm"
+        );
+        assert_eq!(filings[2].form, "10-K/A");
+        assert_eq!(filings[2].primary_document_description, None);
     }
 
     #[test]
