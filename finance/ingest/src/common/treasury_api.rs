@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, error::Error, fmt};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -15,7 +15,35 @@ const TREASURY_RATE_TYPE: &str = "daily_treasury_yield_curve";
 pub async fn fetch_treasury_rates(
     month: &str,
 ) -> Result<BTreeMap<TreasuryDuration, Vec<TreasuryRate>>> {
-    fetch_treasury_rate_period("all", month, "field_tdr_date_value_month").await
+    match fetch_treasury_rate_period("all", month, "field_tdr_date_value_month").await {
+        Ok(rates) => Ok(rates),
+        Err(error) if error.is::<NoTreasuryRates>() => {
+            let previous_month = previous_month(month)?;
+            log::warn!(
+                "Treasury returned no rates for {month}; retrying previous month {previous_month}..."
+            );
+            fetch_treasury_rate_period("all", &previous_month, "field_tdr_date_value_month").await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn previous_month(month: &str) -> Result<String> {
+    if month.len() != 6 {
+        bail!("invalid Treasury month '{month}'");
+    }
+    let year = month[..4]
+        .parse::<i32>()
+        .with_context(|| format!("invalid Treasury month '{month}'"))?;
+    let month_number = month[4..]
+        .parse::<u8>()
+        .with_context(|| format!("invalid Treasury month '{month}'"))?;
+
+    match month_number {
+        1 => Ok(format!("{:04}12", year - 1)),
+        2..=12 => Ok(format!("{year:04}{:02}", month_number - 1)),
+        _ => bail!("invalid Treasury month '{month}'"),
+    }
 }
 
 /// Bootstraps history from Treasury's annual files. Treasury's advertised all-history CSV
@@ -107,6 +135,17 @@ struct TreasuryCsvRow {
     thirty_year: String,
 }
 
+#[derive(Debug)]
+struct NoTreasuryRates;
+
+impl fmt::Display for NoTreasuryRates {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Treasury returned no rates")
+    }
+}
+
+impl Error for NoTreasuryRates {}
+
 fn parse_treasury_rates(csv_data: &[u8]) -> Result<BTreeMap<TreasuryDuration, Vec<TreasuryRate>>> {
     let mut rates = TreasuryDuration::ALL
         .into_iter()
@@ -149,7 +188,7 @@ fn parse_treasury_rates(csv_data: &[u8]) -> Result<BTreeMap<TreasuryDuration, Ve
     }
 
     if rates.values().all(Vec::is_empty) {
-        bail!("Treasury returned no rates");
+        return Err(NoTreasuryRates.into());
     }
     for duration_rates in rates.values_mut() {
         duration_rates.sort_unstable_by(|left, right| left.date.cmp(&right.date));
@@ -174,5 +213,19 @@ mod tests {
         assert_eq!(rates[&TreasuryDuration::OneMonth][0].date, "2026-07-30");
         assert_eq!(rates[&TreasuryDuration::OneMonth][0].value, None);
         assert_eq!(rates[&TreasuryDuration::ThirtyYear][1].value, Some(5.27));
+    }
+
+    #[test]
+    fn computes_previous_month_across_year_boundary() {
+        assert_eq!(previous_month("202608").unwrap(), "202607");
+        assert_eq!(previous_month("202601").unwrap(), "202512");
+    }
+
+    #[test]
+    fn identifies_an_empty_response() {
+        let error = parse_treasury_rates(b"").unwrap_err();
+
+        assert!(error.is::<NoTreasuryRates>());
+        assert_eq!(error.to_string(), "Treasury returned no rates");
     }
 }
