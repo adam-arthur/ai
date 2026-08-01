@@ -69,9 +69,9 @@ impl AlpacaClient {
             is_paper: args.paper,
             urls: AlpacaUrls {
                 account: if args.paper {
-                    "https://paper-api.alpaca.markets".into()
+                    "https://paper-api.alpaca.markets/v2".into()
                 } else {
-                    "https://api.alpaca.markets".into()
+                    "https://api.alpaca.markets/v2".into()
                 },
                 market_data: "https://data.alpaca.markets".into(),
 
@@ -161,7 +161,7 @@ impl AlpacaClient {
 
     pub async fn get_assets(&self, args: &GetAssetsArgs) -> Vec<Asset> {
         self.fetch_from_alpaca::<Vec<Asset>>(
-            &format!("{}/v2/assets", self.urls.account),
+            &format!("{}/assets", self.urls.account),
             &args.to_query_params(),
         )
         .await
@@ -1194,6 +1194,46 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn paper_urls_do_not_duplicate_the_api_version() {
+        let client = AlpacaClient::new(AlpacaClientArgs {
+            key: "test-key".into(),
+            secret: "test-secret".into(),
+            paper: true,
+        });
+
+        assert_eq!(
+            format!("{}/assets", client.urls.account),
+            "https://paper-api.alpaca.markets/v2/assets"
+        );
+        assert_eq!(
+            client.urls.account_socket,
+            "wss://paper-api.alpaca.markets/stream"
+        );
+    }
+
+    #[ignore = "requires live Alpaca credentials"]
+    #[tokio::test]
+    async fn live_paper_credentials_can_fetch_assets() {
+        if dotenvy::dotenv().is_err() {
+            dotenvy::from_filename("ingest/.env").expect("failed to load environment");
+        }
+
+        let client = AlpacaClient::new(AlpacaClientArgs {
+            key: env::var("ALPACA_API_KEY").expect("ALPACA_API_KEY is not set"),
+            secret: env::var("ALPACA_SECRET_KEY").expect("ALPACA_SECRET_KEY is not set"),
+            paper: true,
+        });
+        let assets = client
+            .get_assets(&GetAssetsArgs {
+                status: Some(AssetStatus::Active),
+                asset_class: Some("us_equity".into()),
+            })
+            .await;
+
+        assert!(!assets.is_empty());
+    }
 
     #[test]
     fn bar_requests_always_use_sip() {
