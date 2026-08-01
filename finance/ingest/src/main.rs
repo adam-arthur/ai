@@ -35,7 +35,8 @@ async fn main() {
         .with_timestamp_format(time::macros::format_description!(
             "[day] [hour]:[minute]:[second]"
         ))
-        .with_level(log::LevelFilter::Debug)
+        .with_level(log::LevelFilter::Info)
+        .with_module_level("ingest", log::LevelFilter::Debug)
         .init()
         .unwrap();
 
