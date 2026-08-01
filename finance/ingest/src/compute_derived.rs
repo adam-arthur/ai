@@ -7,13 +7,14 @@ use clap::Parser;
 use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use time::{Date, Duration};
 
 use crate::{
-    common::alpaca_api::CorporateActions, financials::{
+    common::alpaca_api::{CashDividend, CorporateActions}, financials::{
         local_api::{
             read_company_from, read_corporate_actions_from, read_prices_from, read_sector_from, read_tradable_symbols
         }, models::{Company, Exchange, PricePoint, SECTORID_TO_NAME, Sector, SymbolMeta}
-    }, ingest_utils::is_valid_symbol, meta_utils::get_app_data_path
+    }, ingest_utils::{common::SHORT_ISO_PARSER, is_valid_symbol}, meta_utils::get_app_data_path
 };
 
 #[derive(Parser, Debug)]
@@ -156,7 +157,48 @@ struct DerivedStock {
     company: Option<Company>,
     sector: DerivedSector,
     corporate_actions: Vec<CorporateActions>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dividends: Vec<DerivedDividend>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dividend_metrics: Option<DividendMetrics>,
     historical_prices: Vec<PricePoint>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct DerivedDividend {
+    rate: f64,
+    adjusted_rate: f64,
+    split_adjustment_factor: f64,
+    special: bool,
+    foreign: bool,
+    ex_date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    record_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payable_date: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct DividendMetrics {
+    ttm_dividend: f64,
+    ttm_dividend_yield: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forward_dividend: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forward_dividend_yield: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dividend_frequency: Option<DividendFrequency>,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum DividendFrequency {
+    Monthly,
+    Quarterly,
+    SemiAnnual,
+    Annual,
 }
 
 #[serde_with::skip_serializing_none]
@@ -649,6 +691,126 @@ mod tests {
         fs::remove_dir_all(test_root).unwrap();
     }
 
+    #[test]
+    fn dividend_metrics_distinguish_ttm_from_forward_yield() {
+        let actions = serde_json::from_value::<Vec<CorporateActions>>(json!([
+            {
+                "date": "2024-08-15",
+                "cash_dividends": [{ "rate": 0.20, "ex_date": "2024-08-15" }]
+            },
+            {
+                "date": "2024-11-15",
+                "cash_dividends": [{ "rate": 0.20, "ex_date": "2024-11-15" }]
+            },
+            {
+                "date": "2025-02-14",
+                "cash_dividends": [{ "rate": 0.20, "ex_date": "2025-02-14" }]
+            },
+            {
+                "date": "2025-05-15",
+                "cash_dividends": [
+                    { "rate": 0.25, "ex_date": "2025-05-15" },
+                    { "rate": 0.25, "ex_date": "2025-05-15" },
+                    { "rate": 1.00, "special": true, "ex_date": "2025-05-15" }
+                ]
+            }
+        ]))
+        .unwrap();
+        let price = price_point("2025-07-31", 100.0);
+
+        let (dividends, metrics) = derive_dividends(&actions, Some(&price)).unwrap();
+        let metrics = metrics.unwrap();
+
+        assert_eq!(dividends.len(), 5);
+        assert_close(metrics.ttm_dividend, 0.85);
+        assert_close(metrics.ttm_dividend_yield, 0.0085);
+        assert_close(metrics.forward_dividend.unwrap(), 1.0);
+        assert_close(metrics.forward_dividend_yield.unwrap(), 0.01);
+        assert_eq!(
+            metrics.dividend_frequency,
+            Some(DividendFrequency::Quarterly)
+        );
+    }
+
+    #[test]
+    fn dividends_are_adjusted_to_match_split_adjusted_prices() {
+        let actions = serde_json::from_value::<Vec<CorporateActions>>(json!([
+            {
+                "date": "2020-05-08",
+                "cash_dividends": [{ "rate": 0.80, "ex_date": "2020-05-08" }]
+            },
+            {
+                "date": "2020-08-07",
+                "cash_dividends": [{ "rate": 0.80, "ex_date": "2020-08-07" }]
+            },
+            {
+                "date": "2020-08-31",
+                "forward_splits": [{
+                    "new_rate": 4.0,
+                    "old_rate": 1.0,
+                    "ex_date": "2020-08-31"
+                }, {
+                    "new_rate": 4.0,
+                    "old_rate": 1.0,
+                    "ex_date": "2020-08-31"
+                }]
+            }
+        ]))
+        .unwrap();
+        let price = price_point("2020-09-01", 10.0);
+
+        let (dividends, metrics) = derive_dividends(&actions, Some(&price)).unwrap();
+
+        assert_eq!(dividends.len(), 2);
+        for dividend in &dividends {
+            assert_close(dividend.adjusted_rate, 0.20);
+            assert_close(dividend.split_adjustment_factor, 4.0);
+        }
+        assert_close(metrics.unwrap().ttm_dividend, 0.40);
+    }
+
+    #[test]
+    fn stale_dividends_are_not_presented_as_forward_income() {
+        let actions = serde_json::from_value::<Vec<CorporateActions>>(json!([
+            {
+                "date": "2023-02-15",
+                "cash_dividends": [{ "rate": 0.25, "ex_date": "2023-02-15" }]
+            },
+            {
+                "date": "2023-05-15",
+                "cash_dividends": [{ "rate": 0.25, "ex_date": "2023-05-15" }]
+            }
+        ]))
+        .unwrap();
+        let price = price_point("2025-07-31", 10.0);
+
+        let (_, metrics) = derive_dividends(&actions, Some(&price)).unwrap();
+        let metrics = metrics.unwrap();
+
+        assert_close(metrics.ttm_dividend, 0.0);
+        assert_eq!(metrics.dividend_frequency, None);
+        assert_eq!(metrics.forward_dividend, None);
+        assert_eq!(metrics.forward_dividend_yield, None);
+    }
+
+    fn price_point(date: &str, close_price: f64) -> PricePoint {
+        PricePoint {
+            date: date.to_owned(),
+            volume: 100,
+            close_price,
+            high_price: close_price,
+            low_price: close_price,
+            open_price: close_price,
+        }
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     #[tokio::test]
     async fn populate_symbols_reports_failures_and_keeps_existing_files() {
         let test_root = temporary_test_path();
@@ -938,6 +1100,8 @@ fn populate_derived_stock(
 
     let historical_prices = read_prices_from(data_path, &symbol)?;
     let corporate_actions = read_corporate_actions_from(data_path, &symbol)?;
+    let (dividends, dividend_metrics) =
+        derive_dividends(&corporate_actions, historical_prices.last())?;
     let sector = read_sector_from(data_path, &symbol)?;
     let company = read_company_from(data_path, &symbol)?;
     let derived_stock = DerivedStock {
@@ -951,6 +1115,8 @@ fn populate_derived_stock(
         company,
         sector: DerivedSector::from(sector),
         corporate_actions,
+        dividends,
+        dividend_metrics,
         historical_prices,
     };
 
@@ -1042,6 +1208,180 @@ fn populate_derived_stock(
 
     // // @ts-ignore
     // return derivedStock as Stock
+}
+
+fn derive_dividends(
+    corporate_actions: &[CorporateActions],
+    latest_price: Option<&PricePoint>,
+) -> Result<(Vec<DerivedDividend>, Option<DividendMetrics>)> {
+    let Some(latest_price) = latest_price else {
+        return Ok((Vec::new(), None));
+    };
+    let as_of = parse_date(&latest_price.date)?;
+
+    let mut splits = Vec::new();
+    let mut raw_dividends = Vec::new();
+    for actions in corporate_actions {
+        for split in &actions.forward_splits {
+            splits.push((
+                parse_date(&split.ex_date)?,
+                checked_split_ratio(split.new_rate, split.old_rate, &split.ex_date)?,
+            ));
+        }
+        for split in &actions.reverse_splits {
+            splits.push((
+                parse_date(&split.ex_date)?,
+                checked_split_ratio(split.new_rate, split.old_rate, &split.ex_date)?,
+            ));
+        }
+        raw_dividends.extend(actions.cash_dividends.iter());
+    }
+    splits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+    splits.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+
+    let mut dividends = raw_dividends
+        .into_iter()
+        .map(|dividend| normalize_dividend(dividend, &splits, as_of))
+        .collect::<Result<Vec<_>>>()?;
+    dividends.sort_by(|a, b| {
+        a.ex_date
+            .cmp(&b.ex_date)
+            .then_with(|| a.rate.total_cmp(&b.rate))
+            .then_with(|| a.special.cmp(&b.special))
+            .then_with(|| a.foreign.cmp(&b.foreign))
+            .then_with(|| a.record_date.cmp(&b.record_date))
+            .then_with(|| a.payable_date.cmp(&b.payable_date))
+    });
+    dividends.dedup_by(|a, b| same_dividend(a, b));
+
+    if dividends.is_empty() {
+        return Ok((dividends, None));
+    }
+
+    let mut date_to_regular_dividend = BTreeMap::new();
+    for dividend in &dividends {
+        let date = parse_date(&dividend.ex_date)?;
+        if !dividend.special && date <= as_of {
+            *date_to_regular_dividend.entry(date).or_insert(0.0) += dividend.adjusted_rate;
+        }
+    }
+    let regular_dividends = date_to_regular_dividend.into_iter().collect::<Vec<_>>();
+    let ttm_start = as_of - Duration::days(365);
+    let ttm_dividend = regular_dividends
+        .iter()
+        .filter(|(date, _)| *date > ttm_start)
+        .map(|(_, rate)| rate)
+        .sum::<f64>();
+
+    let dividend_frequency = regular_dividends
+        .last()
+        .zip(infer_dividend_frequency(&regular_dividends))
+        .and_then(|((latest_date, _), frequency)| {
+            ((as_of - *latest_date).whole_days() <= frequency.maximum_expected_gap_days())
+                .then_some(frequency)
+        });
+    let forward_dividend = regular_dividends
+        .last()
+        .zip(dividend_frequency)
+        .map(|((_, rate), frequency)| rate * frequency.payments_per_year());
+    let price = latest_price.close_price;
+    let metrics = (price.is_finite() && price > 0.0).then(|| DividendMetrics {
+        ttm_dividend,
+        ttm_dividend_yield: ttm_dividend / price,
+        forward_dividend,
+        forward_dividend_yield: forward_dividend.map(|dividend| dividend / price),
+        dividend_frequency,
+    });
+
+    Ok((dividends, metrics))
+}
+
+fn normalize_dividend(
+    dividend: &CashDividend,
+    splits: &[(Date, f64)],
+    as_of: Date,
+) -> Result<DerivedDividend> {
+    let ex_date = parse_date(&dividend.ex_date)?;
+    let split_adjustment_factor = splits
+        .iter()
+        .filter(|(split_date, _)| *split_date > ex_date && *split_date <= as_of)
+        .map(|(_, ratio)| ratio)
+        .product::<f64>();
+
+    Ok(DerivedDividend {
+        rate: dividend.rate,
+        adjusted_rate: dividend.rate / split_adjustment_factor,
+        split_adjustment_factor,
+        special: dividend.special,
+        foreign: dividend.foreign,
+        ex_date: dividend.ex_date.clone(),
+        record_date: dividend.record_date.clone(),
+        payable_date: dividend.payable_date.clone(),
+    })
+}
+
+fn same_dividend(a: &DerivedDividend, b: &DerivedDividend) -> bool {
+    a.rate == b.rate
+        && a.special == b.special
+        && a.foreign == b.foreign
+        && a.ex_date == b.ex_date
+        && a.record_date == b.record_date
+        && a.payable_date == b.payable_date
+}
+
+fn checked_split_ratio(new_rate: f64, old_rate: f64, ex_date: &str) -> Result<f64> {
+    if !new_rate.is_finite() || !old_rate.is_finite() || new_rate <= 0.0 || old_rate <= 0.0 {
+        bail!("invalid split ratio {new_rate}:{old_rate} on {ex_date}");
+    }
+    Ok(new_rate / old_rate)
+}
+
+fn parse_date(value: &str) -> Result<Date> {
+    Date::parse(value, &SHORT_ISO_PARSER).with_context(|| format!("invalid date {value}"))
+}
+
+fn infer_dividend_frequency(dividends: &[(Date, f64)]) -> Option<DividendFrequency> {
+    let intervals = dividends
+        .windows(2)
+        .rev()
+        .take(4)
+        .map(|window| (window[1].0 - window[0].0).whole_days())
+        .collect::<Vec<_>>();
+    let interval = median(&intervals)?;
+
+    match interval {
+        20..=45 => Some(DividendFrequency::Monthly),
+        70..=110 => Some(DividendFrequency::Quarterly),
+        150..=220 => Some(DividendFrequency::SemiAnnual),
+        300..=430 => Some(DividendFrequency::Annual),
+        _ => None,
+    }
+}
+
+fn median(values: &[i64]) -> Option<i64> {
+    let mut values = values.to_vec();
+    values.sort_unstable();
+    values.get(values.len() / 2).copied()
+}
+
+impl DividendFrequency {
+    fn payments_per_year(self) -> f64 {
+        match self {
+            Self::Monthly => 12.0,
+            Self::Quarterly => 4.0,
+            Self::SemiAnnual => 2.0,
+            Self::Annual => 1.0,
+        }
+    }
+
+    fn maximum_expected_gap_days(self) -> i64 {
+        match self {
+            Self::Monthly => 45,
+            Self::Quarterly => 110,
+            Self::SemiAnnual => 220,
+            Self::Annual => 430,
+        }
+    }
 }
 
 // function getCefScore({
