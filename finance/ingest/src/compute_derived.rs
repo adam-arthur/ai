@@ -24,9 +24,9 @@ use crate::{
 #[command(version = "1.0")]
 #[command(about = "Compute derived data using raw data fetched from various apis")]
 struct Cli {
-    /// Remove existing data
-    #[arg(long = "remove-existing", default_value_t = false)]
-    remove_existing: bool,
+    /// Remove derived data
+    #[arg(long = "remove-derived", default_value_t = false)]
+    remove_derived: bool,
 
     /// Update stocks
     #[arg(long = "update-stocks", default_value_t = false)]
@@ -44,8 +44,8 @@ struct ComputeDerivedOptions {
     /// Skip any failed stocks
     bypass_failures: bool,
 
-    /// Whether to remove the existing derived data before running
-    remove_existing: bool,
+    /// Whether to remove the derived data before running
+    remove_derived: bool,
 
     /// Whether to update stocks
     update_stocks: bool,
@@ -67,7 +67,7 @@ pub async fn compute_derived() {
 
     let options = ComputeDerivedOptions {
         bypass_failures: true, // Weed out any stocks with missing constituent data
-        remove_existing: args.remove_existing,
+        remove_derived: args.remove_derived,
         update_stocks: args.update_stocks,
         update_meta: args.update_meta,
         parallelism: resolve_parallelism(args.parallelism),
@@ -75,7 +75,7 @@ pub async fn compute_derived() {
 
     log::info!("Compute Derived - Populating...");
 
-    if options.remove_existing {
+    if options.remove_derived {
         log::info!("Compute Derived - Clearing out previous...");
         match fs::remove_dir_all(&derived_data_path) {
             Ok(_) => log::info!("Directory removed successfully"),

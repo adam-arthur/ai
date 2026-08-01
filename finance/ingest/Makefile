@@ -1,2 +1,2 @@
 updateStocks:
-	cargo run -- --remove-existing --update-meta --update-stocks
+	cargo run -- --remove-derived --update-stocks --update-meta
