@@ -7,6 +7,8 @@ use crate::{
 
 use super::common::EnsureDataResult;
 
+const EXCHANGE_RATE_HISTORY_START: &str = "2016-01-01";
+
 pub async fn ensure_exchange_rates() -> EnsureDataResult<Vec<ExchangeRateSnapshot>> {
     struct EnsureExchangeRates;
 
@@ -16,13 +18,11 @@ pub async fn ensure_exchange_rates() -> EnsureDataResult<Vec<ExchangeRateSnapsho
             &self,
             cached_data: Option<Vec<ExchangeRateSnapshot>>,
         ) -> Vec<ExchangeRateSnapshot> {
-            let start_period = cached_data
-                .as_ref()
-                .and_then(|snapshots| snapshots.last())
-                .map(|snapshot| snapshot.as_of.as_str());
+            let cached_snapshots = cached_data.as_deref().unwrap_or_default();
+            let start_period = exchange_rate_start_period(cached_snapshots);
             log::debug!(
                 "ExchangeRates - fetching {} data...",
-                if start_period.is_some() {
+                if !cached_snapshots.is_empty() {
                     "partial"
                 } else {
                     "historical"
@@ -61,6 +61,14 @@ pub async fn ensure_exchange_rates() -> EnsureDataResult<Vec<ExchangeRateSnapsho
     data
 }
 
+fn exchange_rate_start_period(snapshots: &[ExchangeRateSnapshot]) -> &str {
+    snapshots
+        .last()
+        .map_or(EXCHANGE_RATE_HISTORY_START, |snapshot| {
+            snapshot.as_of.as_str()
+        })
+}
+
 fn merge_exchange_rates(
     cached_data: Vec<ExchangeRateSnapshot>,
     fresh_data: Vec<ExchangeRateSnapshot>,
@@ -91,6 +99,18 @@ mod tests {
             base: Currency::EUR,
             rates: BTreeMap::from([(Currency::EUR, 1.0), (Currency::USD, usd_rate)]),
         }
+    }
+
+    #[test]
+    fn starts_exchange_rate_history_in_2016() {
+        assert_eq!(exchange_rate_start_period(&[]), "2016-01-01");
+    }
+
+    #[test]
+    fn resumes_exchange_rate_history_from_latest_snapshot() {
+        let snapshots = vec![snapshot("2026-07-29", 1.1), snapshot("2026-07-30", 1.2)];
+
+        assert_eq!(exchange_rate_start_period(&snapshots), "2026-07-30");
     }
 
     #[test]

@@ -13,14 +13,12 @@ const ECB_EXCHANGE_RATES_URL: &str =
 
 /// Fetches daily ECB reference rates. ECB observations are quoted as units of
 /// each currency per euro, so the returned snapshots use EUR as their base.
-pub async fn fetch_exchange_rates(start_period: Option<&str>) -> Result<Vec<ExchangeRateSnapshot>> {
-    let mut request = HTTP
-        .get(ECB_EXCHANGE_RATES_URL)
-        .query(&[("format", "csvdata"), ("detail", "dataonly")]);
-
-    if let Some(start_period) = start_period {
-        request = request.query(&[("startPeriod", start_period)]);
-    }
+pub async fn fetch_exchange_rates(start_period: &str) -> Result<Vec<ExchangeRateSnapshot>> {
+    let request = HTTP.get(ECB_EXCHANGE_RATES_URL).query(&[
+        ("format", "csvdata"),
+        ("detail", "dataonly"),
+        ("startPeriod", start_period),
+    ]);
 
     let response = request
         .send()
