@@ -32,7 +32,6 @@ pub async fn ensure_prices(symbol: &String) -> EnsureDataResult<Vec<PricePoint>>
                     .await;
 
                     let last_cached_date = cached_prices.last().unwrap().date.clone();
-                    // let mut prices = (*cached_prices).clone(); // TODO: Do we need this clone?
                     for new_price in new_prices {
                         // TODO: Shouldn't be needed
                         if last_cached_date == new_price.date {
@@ -41,7 +40,6 @@ pub async fn ensure_prices(symbol: &String) -> EnsureDataResult<Vec<PricePoint>>
                         cached_prices.push(new_price);
                     }
 
-                    // TODO: Is modifying cached_prices a good idea?
                     cached_prices
                 }
                 _ => {

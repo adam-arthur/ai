@@ -12,7 +12,7 @@ use tokio::time::sleep;
 
 use crate::{
     common::ALPACA,
-    financials::models::{Exchange, PricePoint},
+    financials::models::{BorrowStatus, Exchange, PricePoint},
     // ADAMTODO: Circular dependency, fix
     ingest_utils::common::{SHORT_ISO_PARSER, parse_short_iso, str_to_short_iso, to_end_of_day},
 };
@@ -817,7 +817,7 @@ impl GetCorporateActionsArgs {
 
 impl GetBarsArgs {
     pub fn to_query_params(&self) -> Vec<(String, String)> {
-        let mut params: Vec<(String, String)> = Vec::with_capacity(6);
+        let mut params: Vec<(String, String)> = Vec::with_capacity(7);
         params.push(("start".into(), self.start.clone()));
 
         if let Some(end) = &self.end {
@@ -832,6 +832,7 @@ impl GetBarsArgs {
         if let Some(adjustment) = &self.adjustment {
             params.push(("adjustment".into(), adjustment.clone()))
         }
+        params.push(("feed".into(), "sip".into()));
         if let Some(page_token) = &self.page_token {
             params.push(("page_token".into(), page_token.clone()))
         }
@@ -872,9 +873,9 @@ pub struct Asset {
     /// Asset is shortable or not
     pub shortable: bool,
 
-    /// Asset is easy-to-borrow or not (filtering for easy_to_borrow = True is the best way
-    /// to check whether the name is currently available to short at Alpaca).
-    pub easy_to_borrow: bool,
+    /// Current Alpaca borrow classification. This may be absent for assets where borrow
+    /// availability is not applicable or unavailable.
+    pub borrow_status: Option<BorrowStatus>,
 
     /// Asset is fractionable or not.
     pub fractionable: bool,
@@ -1193,6 +1194,22 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn bar_requests_always_use_sip() {
+        let params = GetBarsArgs {
+            symbol: "AAPL".into(),
+            start: "2026-07-01T00:00:00Z".into(),
+            end: None,
+            limit: Some(100),
+            timeframe: "1Day".into(),
+            adjustment: Some("split".into()),
+            page_token: None,
+        }
+        .to_query_params();
+
+        assert!(params.contains(&("feed".into(), "sip".into())));
+    }
 
     #[test]
     fn canonicalization_deduplicates_only_regular_cash_dividends() {

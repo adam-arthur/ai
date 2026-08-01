@@ -1,9 +1,9 @@
 pub mod alpaca_api;
 pub mod cefconnect_api;
 pub mod ecb_api;
-pub mod fred_api;
 pub mod sec_api;
 pub mod seekingalpha_api;
+pub mod treasury_api;
 
 use std::env;
 

@@ -20,7 +20,7 @@ pub async fn fetch_all_tradable_symbols() -> Vec<SymbolMeta> {
             cik: symbol_to_cik.get(&v.symbol).map(|v| v.to_string()),
             name: v.name.to_owned(),
             exchange: v.exchange,
-            is_easy_to_borrow: v.easy_to_borrow,
+            borrow_status: v.borrow_status,
             is_shortable: v.shortable,
             is_fractionable: v.fractionable,
         })

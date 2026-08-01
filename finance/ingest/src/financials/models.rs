@@ -38,9 +38,43 @@ pub struct SymbolMeta {
     pub cik: Option<String>,
     pub name: String,
     pub exchange: Exchange,
-    pub is_easy_to_borrow: bool,
+    #[serde(
+        default,
+        alias = "is_easy_to_borrow",
+        deserialize_with = "deserialize_borrow_status"
+    )]
+    pub borrow_status: Option<BorrowStatus>,
     pub is_shortable: bool,
     pub is_fractionable: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BorrowStatus {
+    EasyToBorrow,
+    HardToBorrow,
+    #[serde(other)]
+    Unknown,
+}
+
+fn deserialize_borrow_status<'de, D>(deserializer: D) -> Result<Option<BorrowStatus>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BorrowStatusValue {
+        Current(BorrowStatus),
+        Legacy(bool),
+    }
+
+    Ok(
+        Option::<BorrowStatusValue>::deserialize(deserializer)?.and_then(|value| match value {
+            BorrowStatusValue::Current(status) => Some(status),
+            BorrowStatusValue::Legacy(true) => Some(BorrowStatus::EasyToBorrow),
+            BorrowStatusValue::Legacy(false) => None,
+        }),
+    )
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -50,7 +84,21 @@ pub struct TreasuryRate {
     pub value: Option<f32>,
 }
 
-#[derive(EnumIter, EnumString, Display, Debug, Serialize, Deserialize, Clone, Copy)]
+#[derive(
+    EnumIter,
+    EnumString,
+    Display,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
 pub enum TreasuryDuration {
     #[serde(rename = "1mo")]
     OneMonth,
@@ -77,6 +125,20 @@ pub enum TreasuryDuration {
 }
 
 impl TreasuryDuration {
+    pub const ALL: [Self; 11] = [
+        Self::OneMonth,
+        Self::ThreeMonth,
+        Self::SixMonth,
+        Self::OneYear,
+        Self::TwoYear,
+        Self::ThreeYear,
+        Self::FiveYear,
+        Self::SevenYear,
+        Self::TenYear,
+        Self::TwentyYear,
+        Self::ThirtyYear,
+    ];
+
     pub fn as_value(&self) -> String {
         match self {
             TreasuryDuration::OneMonth => "1mo",
@@ -90,23 +152,6 @@ impl TreasuryDuration {
             TreasuryDuration::TenYear => "10y",
             TreasuryDuration::TwentyYear => "20y",
             TreasuryDuration::ThirtyYear => "30y",
-        }
-        .into()
-    }
-
-    pub fn as_series_name(&self) -> String {
-        match self {
-            TreasuryDuration::OneMonth => "DGS1MO",
-            TreasuryDuration::ThreeMonth => "DGS3MO",
-            TreasuryDuration::SixMonth => "DGS6MO",
-            TreasuryDuration::OneYear => "DGS1",
-            TreasuryDuration::TwoYear => "DGS2",
-            TreasuryDuration::ThreeYear => "DGS3",
-            TreasuryDuration::FiveYear => "DGS5",
-            TreasuryDuration::SevenYear => "DGS7",
-            TreasuryDuration::TenYear => "DGS10",
-            TreasuryDuration::TwentyYear => "DGS20",
-            TreasuryDuration::ThirtyYear => "DGS30",
         }
         .into()
     }
@@ -536,4 +581,26 @@ pub struct CefMeta {
 
     #[serde(alias = "NavTicker")]
     pub nav_symbol: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn legacy_easy_to_borrow_cache_maps_to_borrow_status() {
+        let symbol = serde_json::from_value::<SymbolMeta>(json!({
+            "symbol": "AAPL",
+            "name": "Apple Inc.",
+            "exchange": "NASDAQ",
+            "is_easy_to_borrow": true,
+            "is_shortable": true,
+            "is_fractionable": true
+        }))
+        .unwrap();
+
+        assert_eq!(symbol.borrow_status, Some(BorrowStatus::EasyToBorrow));
+    }
 }

@@ -165,7 +165,10 @@ where
     !stale_sector_symbols.is_empty()
 }
 
-fn is_stale<T>(data: &Option<FileSystemData<T>>, time_until_cache_is_stale: Duration) -> bool {
+pub(crate) fn is_stale<T>(
+    data: &Option<FileSystemData<T>>,
+    time_until_cache_is_stale: Duration,
+) -> bool {
     if data.is_none() {
         return true;
     }
@@ -178,7 +181,7 @@ fn get_time_ago(iso_time: &str) -> Duration {
         - OffsetDateTime::parse(iso_time, &Rfc3339).expect("Failed to parse date-time")
 }
 
-fn get_cached_data<T>(cached_path: &str) -> Option<FileSystemData<T>>
+pub(crate) fn get_cached_data<T>(cached_path: &str) -> Option<FileSystemData<T>>
 where
     T: DeserializeOwned,
 {

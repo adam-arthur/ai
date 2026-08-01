@@ -13,7 +13,9 @@ use crate::{
     common::alpaca_api::{CashDividend, CorporateActions}, file_utils::write_json_atomic, financials::{
         local_api::{
             read_company_from, read_corporate_actions_from, read_prices_from, read_sector_from, read_tradable_symbols
-        }, models::{Company, Exchange, PricePoint, SECTORID_TO_NAME, Sector, SymbolMeta}
+        }, models::{
+            BorrowStatus, Company, Exchange, PricePoint, SECTORID_TO_NAME, Sector, SymbolMeta
+        }
     }, ingest_utils::{common::SHORT_ISO_PARSER, is_valid_symbol}, meta_utils::get_app_data_path
 };
 
@@ -145,7 +147,8 @@ struct DerivedStock {
     symbol: String,
     name: String,
     exchange: Exchange,
-    is_easy_to_borrow: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    borrow_status: Option<BorrowStatus>,
     is_shortable: bool,
     is_fractionable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -511,7 +514,7 @@ fn populate_derived_stock(
         cik,
         name,
         exchange,
-        is_easy_to_borrow,
+        borrow_status,
         is_shortable,
         is_fractionable,
     } = symbol_meta;
@@ -527,7 +530,7 @@ fn populate_derived_stock(
         symbol: symbol.clone(),
         name,
         exchange,
-        is_easy_to_borrow,
+        borrow_status,
         is_shortable,
         is_fractionable,
         company,
@@ -869,7 +872,7 @@ mod tests {
                 "symbol": "AAPL",
                 "name": "Apple Inc.",
                 "exchange": "NASDAQ",
-                "isEasyToBorrow": true,
+                "borrowStatus": "easy_to_borrow",
                 "isShortable": true,
                 "isFractionable": true,
                 "company": {
@@ -1081,7 +1084,7 @@ mod tests {
             cik: Some("320193".to_owned()),
             name: "Apple Inc.".to_owned(),
             exchange: Exchange::NASDAQ,
-            is_easy_to_borrow: true,
+            borrow_status: Some(BorrowStatus::EasyToBorrow),
             is_shortable: true,
             is_fractionable: true,
         }
