@@ -278,7 +278,7 @@ pub struct IngestSettings {
 
 pub const INGEST_SETTINGS: IngestSettings = IngestSettings {
     sa_throttle_duration: std::time::Duration::from_secs(180),
-    sa_fetch_chunk_size: 200,
+    sa_fetch_chunk_size: 50,
 };
 
 #[cfg(test)]
