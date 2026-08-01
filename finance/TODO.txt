@@ -1,0 +1,3 @@
+- Decide on treasury history. (have data from 1969)
+- Fix Alpaca API Key
+- Pull all new data

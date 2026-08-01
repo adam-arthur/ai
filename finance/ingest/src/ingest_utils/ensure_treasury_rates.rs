@@ -6,7 +6,7 @@ use crate::{
     common::treasury_api::{fetch_treasury_rate_history, fetch_treasury_rates}, file_utils::write_json_atomic, financials::models::{TreasuryDuration, TreasuryRate}, ingest_utils::common::{DataMeta, FileSystemData, get_cached_data, is_stale}, meta_utils::get_app_data_path
 };
 
-const TREASURY_HISTORY_START_YEAR: i32 = 2015;
+const TREASURY_HISTORY_START_YEAR: i32 = 2016;
 
 pub async fn ensure_treasury_rates() {
     let mut cached = TreasuryDuration::ALL
