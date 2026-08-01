@@ -1,16 +1,39 @@
 use std::{error::Error, fmt, sync::OnceLock};
 
 use crate::{
-    Model, ModelError, ModelId, ModelMessage, ModelRequest, ModelResponse, async_trait,
-    llama::LlamaClient, model::Backend,
+    ImageInput, Model, ModelError, ModelId, ModelMessage, ModelRequest, ModelResponse,
+    ModelResponseFormat, async_trait, llama::LlamaClient, model::Backend,
 };
 
 static DEFAULT_CLIENT: OnceLock<Client> = OnceLock::new();
 
 /// Asks a model a single user question using backends configured from the
 /// process environment.
-pub async fn ask(model: ModelId, prompt: impl Into<String>) -> Result<String, ClientError> {
-    default_client()?.ask(model, prompt).await
+pub async fn ask(request: AskRequest) -> Result<String, ClientError> {
+    default_client()?.ask(request).await
+}
+
+/// Options for asking a model a single user question.
+#[derive(bon::Builder, Clone, Debug, PartialEq)]
+pub struct AskRequest {
+    model: ModelId,
+    #[builder(into)]
+    prompt: String,
+    image: Option<ImageInput>,
+    response_format: Option<ModelResponseFormat>,
+}
+
+impl AskRequest {
+    fn into_model_request(self) -> ModelRequest {
+        let message = match self.image {
+            Some(image) => ModelMessage::user_with_image(self.prompt, image),
+            None => ModelMessage::user(self.prompt),
+        };
+
+        ModelRequest::builder(self.model, [message])
+            .maybe_response_format(self.response_format)
+            .build()
+    }
 }
 
 fn default_client() -> Result<&'static Client, ClientError> {
@@ -36,11 +59,9 @@ impl Client {
         })
     }
 
-    /// Sends a single user prompt to the backend selected by `model`.
-    async fn ask(&self, model: ModelId, prompt: impl Into<String>) -> Result<String, ClientError> {
-        let response = self
-            .complete_request(ModelRequest::builder(model, [ModelMessage::user(prompt)]).build())
-            .await?;
+    /// Sends a single user prompt to the selected model backend.
+    async fn ask(&self, request: AskRequest) -> Result<String, ClientError> {
+        let response = self.complete_request(request.into_model_request()).await?;
         Ok(response.content)
     }
 
@@ -87,5 +108,33 @@ impl Error for ClientError {
         self.source
             .as_deref()
             .map(|source| source as &(dyn Error + 'static))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ask_request_builds_a_multimodal_model_request() {
+        let request = AskRequest::builder()
+            .model(ModelId::GEMMA_4_E2B_Q4)
+            .prompt("Describe this image")
+            .image(ImageInput::new("image/png", [1, 2, 3]))
+            .response_format(ModelResponseFormat::JsonObject)
+            .build()
+            .into_model_request();
+
+        assert_eq!(request.model, ModelId::GEMMA_4_E2B_Q4);
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.messages[0].content, "Describe this image");
+        assert_eq!(
+            request.messages[0].image,
+            Some(ImageInput::new("image/png", [1, 2, 3]))
+        );
+        assert_eq!(
+            request.response_format,
+            Some(ModelResponseFormat::JsonObject)
+        );
     }
 }

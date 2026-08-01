@@ -101,6 +101,8 @@ pub enum ModelResponseFormat {
 pub struct ModelMessage {
     pub role: ModelRole,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageInput>,
 }
 
 impl ModelMessage {
@@ -108,6 +110,7 @@ impl ModelMessage {
         Self {
             role: ModelRole::System,
             content: content.into(),
+            image: None,
         }
     }
 
@@ -115,6 +118,15 @@ impl ModelMessage {
         Self {
             role: ModelRole::User,
             content: content.into(),
+            image: None,
+        }
+    }
+
+    pub fn user_with_image(content: impl Into<String>, image: ImageInput) -> Self {
+        Self {
+            role: ModelRole::User,
+            content: content.into(),
+            image: Some(image),
         }
     }
 
@@ -122,7 +134,32 @@ impl ModelMessage {
         Self {
             role: ModelRole::Assistant,
             content: content.into(),
+            image: None,
         }
+    }
+}
+
+/// Raw image bytes and their media type, supplied as model input.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageInput {
+    media_type: String,
+    data: Vec<u8>,
+}
+
+impl ImageInput {
+    pub fn new(media_type: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            media_type: media_type.into(),
+            data: data.into(),
+        }
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.data
     }
 }
 

@@ -1,6 +1,11 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+
 use crate::{
     ModelRequest, ModelResponse, ModelResponseFormat, ModelRole, ModelUsage,
-    openai::{ChatMessage, ChatRequest, JsonSchemaFormat, OpenAiClient, ResponseFormat, Role},
+    openai::{
+        ChatContent, ChatContentPart, ChatMessage, ChatRequest, ImageUrl, JsonSchemaFormat,
+        OpenAiClient, ResponseFormat, Role,
+    },
 };
 
 use super::{LlamaClientError, LlamaConfig};
@@ -38,13 +43,31 @@ impl LlamaClient {
             request
                 .messages
                 .into_iter()
-                .map(|message| ChatMessage {
-                    role: match message.role {
+                .map(|message| {
+                    let role = match message.role {
                         ModelRole::System => Role::System,
                         ModelRole::User => Role::User,
                         ModelRole::Assistant => Role::Assistant,
-                    },
-                    content: message.content,
+                    };
+                    let content = match message.image {
+                        Some(image) => ChatContent::Parts(vec![
+                            ChatContentPart::Text {
+                                text: message.content,
+                            },
+                            ChatContentPart::ImageUrl {
+                                image_url: ImageUrl {
+                                    url: format!(
+                                        "data:{};base64,{}",
+                                        image.media_type(),
+                                        STANDARD.encode(image.data())
+                                    ),
+                                },
+                            },
+                        ]),
+                        None => ChatContent::Text(message.content),
+                    };
+
+                    ChatMessage { role, content }
                 })
                 .collect::<Vec<_>>(),
         )
@@ -75,7 +98,7 @@ impl LlamaClient {
         });
 
         Ok(ModelResponse {
-            content: choice.message.content,
+            content: choice.message.content.into_text(),
             usage,
         })
     }

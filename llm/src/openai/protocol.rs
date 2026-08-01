@@ -12,7 +12,41 @@ pub enum Role {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
-    pub content: String,
+    pub content: ChatContent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChatContent {
+    Text(String),
+    Parts(Vec<ChatContentPart>),
+}
+
+impl ChatContent {
+    pub fn into_text(self) -> String {
+        match self {
+            Self::Text(text) => text,
+            Self::Parts(parts) => parts
+                .into_iter()
+                .filter_map(|part| match part {
+                    ChatContentPart::Text { text } => Some(text),
+                    ChatContentPart::ImageUrl { .. } => None,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,
 }
 
 #[cfg(test)]
@@ -20,14 +54,14 @@ impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: Role::System,
-            content: content.into(),
+            content: ChatContent::Text(content.into()),
         }
     }
 
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: Role::User,
-            content: content.into(),
+            content: ChatContent::Text(content.into()),
         }
     }
 }
@@ -135,6 +169,38 @@ mod tests {
                     "schema": { "type": "object" }
                 }
             })
+        );
+    }
+
+    #[test]
+    fn chat_request_serializes_multimodal_content() {
+        let request = ChatRequest::builder(
+            "test-model",
+            [ChatMessage {
+                role: Role::User,
+                content: ChatContent::Parts(vec![
+                    ChatContentPart::Text {
+                        text: "Describe this image".into(),
+                    },
+                    ChatContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,AQID".into(),
+                        },
+                    },
+                ]),
+            }],
+        )
+        .build();
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["messages"][0]["content"],
+            serde_json::json!([
+                { "type": "text", "text": "Describe this image" },
+                {
+                    "type": "image_url",
+                    "image_url": { "url": "data:image/png;base64,AQID" }
+                }
+            ])
         );
     }
 }
