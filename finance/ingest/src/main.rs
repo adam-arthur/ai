@@ -36,7 +36,6 @@ async fn main() {
             "[day] [hour]:[minute]:[second]"
         ))
         .with_level(log::LevelFilter::Info)
-        .with_module_level("ingest", log::LevelFilter::Debug)
         .init()
         .unwrap();
 

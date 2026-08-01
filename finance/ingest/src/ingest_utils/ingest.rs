@@ -1,5 +1,6 @@
+use std::time::{Duration, Instant};
+
 use futures::{StreamExt, stream};
-use time::OffsetDateTime;
 
 use crate::financials::local_api::read_sector_from;
 use crate::financials::models::SymbolMeta;
@@ -49,6 +50,7 @@ async fn populate_ffo(tradable_symbols: &[SymbolMeta]) {
     log::info!("FFO - identifying equity REITs...");
     let data_path = get_app_data_path();
 
+    let mut reits = Vec::new();
     for symbol_meta in tradable_symbols {
         let symbol = &symbol_meta.symbol;
         let sector = match read_sector_from(data_path, symbol) {
@@ -69,9 +71,20 @@ async fn populate_ffo(tradable_symbols: &[SymbolMeta]) {
             log::warn!("{} - FFO - no CIK, skipping...", symbol);
             continue;
         };
-        if let Err(error) = ensure_ffo(symbol, cik).await {
-            log::error!("{} - FFO - ingest failed: {error:#}", symbol);
-        }
+        reits.push((symbol.as_str(), cik));
+    }
+
+    let mut progress = CompletionProgress::new("FFO", reits.len());
+    let mut tasks = stream::iter(reits)
+        .map(|(symbol, cik)| async move {
+            let start_time = Instant::now();
+            let result = ensure_ffo(symbol, cik).await;
+            (symbol, start_time.elapsed(), result)
+        })
+        .buffer_unordered(INGEST_SETTINGS.symbol_concurrency);
+
+    while let Some((symbol, elapsed, result)) = tasks.next().await {
+        progress.log(symbol, elapsed, result.err().as_ref());
     }
 }
 
@@ -86,12 +99,11 @@ async fn populate_sectors(tradable_symbols: &[String]) {
 async fn populate_timeseries(tradable_symbols: &[SymbolMeta]) {
     log::info!("Ingesting: Companies, Timeseries, Corporate Actions...");
 
-    // ADAMTODO: 10 may be too high.. limited to 10_000 requests/min
-    stream::iter(tradable_symbols.iter().enumerate())
-        .for_each_concurrent(10, |(idx, symbol_meta)| async move {
+    let mut progress = CompletionProgress::new("Stock", tradable_symbols.len());
+    let mut tasks = stream::iter(tradable_symbols)
+        .map(|symbol_meta| async move {
             let symbol = &symbol_meta.symbol;
-            log::info!("Processing: {}...", symbol);
-            let start_time = OffsetDateTime::now_utc();
+            let start_time = Instant::now();
             let company = async {
                 if let Some(cik) = &symbol_meta.cik {
                     ensure_company(symbol, cik).await;
@@ -104,17 +116,59 @@ async fn populate_timeseries(tradable_symbols: &[SymbolMeta]) {
                 ensure_prices(symbol),
                 company
             );
-
-            let elapsed_time = OffsetDateTime::now_utc() - start_time;
-            log::info!(
-                "Stock {} of {} ({:.2}%) ({:.3}s)",
-                idx + 1,
-                tradable_symbols.len(),
-                100.0f32 * ((idx + 1) as f32 / tradable_symbols.len() as f32),
-                elapsed_time.as_seconds_f32()
-            );
+            (symbol.as_str(), start_time.elapsed())
         })
-        .await
+        .buffer_unordered(INGEST_SETTINGS.symbol_concurrency);
+
+    while let Some((symbol, elapsed)) = tasks.next().await {
+        progress.log(symbol, elapsed, None);
+    }
+}
+
+struct CompletionProgress {
+    data_name: &'static str,
+    completed: usize,
+    total: usize,
+}
+
+impl CompletionProgress {
+    fn new(data_name: &'static str, total: usize) -> Self {
+        Self {
+            data_name,
+            completed: 0,
+            total,
+        }
+    }
+
+    fn log(&mut self, symbol: &str, elapsed: Duration, error: Option<&anyhow::Error>) {
+        self.completed += 1;
+        let percentage = if self.total == 0 {
+            100.0
+        } else {
+            100.0 * self.completed as f32 / self.total as f32
+        };
+        let status = if error.is_some() {
+            "failed"
+        } else {
+            "completed"
+        };
+        let message = format!(
+            "{} - {} {} - {} of {} ({:.2}%) ({:.3}s)",
+            self.data_name,
+            status,
+            symbol,
+            self.completed,
+            self.total,
+            percentage,
+            elapsed.as_secs_f32()
+        );
+
+        if let Some(error) = error {
+            log::error!("{message}: {error:#}");
+        } else {
+            log::info!("{message}");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -272,11 +272,13 @@ pub fn str_to_short_iso(date_str: &str) -> String {
 
 #[derive(Debug)]
 pub struct IngestSettings {
+    pub symbol_concurrency: usize,
     pub sa_throttle_duration: std::time::Duration,
     pub sa_fetch_chunk_size: u16,
 }
 
 pub const INGEST_SETTINGS: IngestSettings = IngestSettings {
+    symbol_concurrency: 4,
     sa_throttle_duration: std::time::Duration::from_secs(180),
     sa_fetch_chunk_size: 50,
 };
