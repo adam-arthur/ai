@@ -43,7 +43,7 @@ struct EcbExchangeRateRow {
     #[serde(rename = "TIME_PERIOD")]
     time_period: String,
     #[serde(rename = "OBS_VALUE")]
-    value: f64,
+    value: Option<f64>,
 }
 
 fn parse_exchange_rates(csv_data: &[u8]) -> Result<Vec<ExchangeRateSnapshot>> {
@@ -54,11 +54,14 @@ fn parse_exchange_rates(csv_data: &[u8]) -> Result<Vec<ExchangeRateSnapshot>> {
 
     for row in csv::Reader::from_reader(csv_data).deserialize::<EcbExchangeRateRow>() {
         let row = row.context("failed to parse ECB exchange-rate CSV")?;
-        if !row.value.is_finite() || row.value <= 0.0 {
+        let Some(value) = row.value else {
+            continue;
+        };
+        if !value.is_finite() || value <= 0.0 {
             bail!(
                 "ECB returned invalid {} exchange rate {} for {}",
                 row.currency,
-                row.value,
+                value,
                 row.time_period
             );
         }
@@ -66,7 +69,7 @@ fn parse_exchange_rates(csv_data: &[u8]) -> Result<Vec<ExchangeRateSnapshot>> {
         let previous = rates_by_date
             .entry(row.time_period.clone())
             .or_default()
-            .insert(row.currency, row.value);
+            .insert(row.currency, value);
         if previous.is_some() {
             bail!(
                 "ECB returned duplicate {} exchange rate for {}",
@@ -143,5 +146,20 @@ EXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,2026-07-30,1.1609\n";
         );
 
         assert!(parse_exchange_rates(incomplete.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn skips_dates_without_published_rates() {
+        let unpublished = "EXR.D.CAD.EUR.SP00.A,D,CAD,EUR,SP00,A,2026-07-31,\n\
+EXR.D.GBP.EUR.SP00.A,D,GBP,EUR,SP00,A,2026-07-31,\n\
+EXR.D.HKD.EUR.SP00.A,D,HKD,EUR,SP00,A,2026-07-31,\n\
+EXR.D.JPY.EUR.SP00.A,D,JPY,EUR,SP00,A,2026-07-31,\n\
+EXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,2026-07-31,\n";
+        let csv = format!("{CSV}{unpublished}");
+
+        let snapshots = parse_exchange_rates(csv.as_bytes()).unwrap();
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].as_of, "2026-07-30");
     }
 }
