@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use once_cell::sync::Lazy;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use strum_macros::{Display, EnumIter, EnumString};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
@@ -462,54 +462,6 @@ pub struct PricePoint {
     pub open_price: f64,  // 17.68,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct Dividend {
-    #[serde(rename = "refid")]
-    pub id: u32,
-    pub amount: f64, // 0.69,
-    pub currency: String,
-    pub frequency: String, // 'MONTHLY' | 'QUARTERLY' | 'SEMI_ANNUALY' | 'ANNUALLY' | 'NONE' | 'OTHER' | 'UNKNOWN' // TODO: others?
-    pub description: String,
-
-    pub ex_date: String, // "2021-07-27",
-    // Seems this is not being returned?
-    // pub pay_date: Option<String>,    // "2021-08-02",
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub record_date: Option<String>, // "2021-07-28",
-                                     // pub declare_date: Option<String>, // "2021-07-15",
-                                     // indexDate: string // "2021-07-27" - Lets you know which cache date to use
-                                     // adjusted_amount: u32,         // 0.69, - Adjusted for currency as well
-                                     // split_adjustment_factor: u32, // 1
-
-                                     // TODO: may be worth moving into separate map for space reasons
-                                     // currency_exchange_rate: u32,
-} // semi-annual, monthly, quarterly, annual, blank
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct Split {
-    #[serde(rename = "refid")]
-    pub id: u32,
-    pub description: String, // 'Ordinary Shares',
-    pub ex_date: String,     // '2020-08-31',
-
-    // TODO: Make optional and treat 0 values as None\
-    #[serde(deserialize_with = "deserialize_optional_float")]
-    pub from_factor: Option<f64>, // 1,
-
-    #[serde(deserialize_with = "deserialize_optional_float")]
-    pub to_factor: Option<f64>, // 4,
-
-    // TODO: Should  remove and calculate as needed instead
-    #[serde(deserialize_with = "deserialize_optional_float")]
-    pub ratio: Option<f64>, // 0.25,
-
-                            // Timestamp representing when updated.
-                            // ADAMTODO: This t
-                            // pub updated: Option<u64>,
-}
-
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -531,15 +483,6 @@ pub struct Company {
     pub phone: Option<String>,
     pub state_of_incorporation: Option<String>,
     pub fiscal_year_end: Option<String>,
-}
-
-fn deserialize_optional_float<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value: Option<f64> =
-        Deserialize::deserialize(deserializer).expect("Failed to deserialize into Option<f64>");
-    Ok(value.and_then(|v| if v == 0.0 { None } else { Some(v) }))
 }
 
 #[derive(Serialize, Deserialize, Debug)]

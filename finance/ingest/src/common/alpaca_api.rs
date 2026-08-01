@@ -570,7 +570,8 @@ pub struct AlpacaCorporateActions {
 
 #[derive(Deserialize, Debug)]
 pub struct AlpacaReverseSplit {
-    pub symbol: String,
+    #[serde(rename = "symbol")]
+    pub _symbol: String,
     pub new_rate: f64,
     pub old_rate: f64,
     pub process_date: String,
@@ -581,7 +582,8 @@ pub struct AlpacaReverseSplit {
 
 #[derive(Deserialize, Debug)]
 pub struct AlpacaForwardSplit {
-    pub symbol: String,
+    #[serde(rename = "symbol")]
+    pub _symbol: String,
     pub new_rate: f64,
     pub old_rate: f64,
     pub process_date: String,
@@ -606,7 +608,8 @@ pub struct AlpacaUnitSplit {
 
 #[derive(Deserialize, Debug)]
 pub struct AlpacaStockDividend {
-    pub symbol: String,
+    #[serde(rename = "symbol")]
+    pub _symbol: String,
     pub rate: f64,
     pub process_date: String,
     pub ex_date: String,
@@ -616,7 +619,8 @@ pub struct AlpacaStockDividend {
 
 #[derive(Deserialize, Debug)]
 pub struct AlpacaCashDividend {
-    pub symbol: String,
+    #[serde(rename = "symbol")]
+    pub _symbol: String,
     pub rate: f64,
     pub special: bool,
     pub foreign: bool,
@@ -676,7 +680,8 @@ pub struct AlpacaStockAndCashMerger {
 
 #[derive(Deserialize, Debug)]
 pub struct AlpacaRedemption {
-    pub symbol: String,
+    #[serde(rename = "symbol")]
+    pub _symbol: String,
     pub rate: f64,
     pub process_date: String,
     pub payable_date: Option<String>,
@@ -1019,7 +1024,7 @@ pub async fn fetch_corporate_actions(symbol: &str, start: &str) -> Vec<Corporate
         )
         .collect::<HashSet<&String>>()
         .into_iter()
-        .map(|v| parse_short_iso(&v))
+        .map(|v| parse_short_iso(v))
         .sorted()
         .map(|v| v.format(&SHORT_ISO_PARSER).expect("Failed to format date"))
         .collect();

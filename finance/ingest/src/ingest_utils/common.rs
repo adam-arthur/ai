@@ -7,6 +7,8 @@ use time::{
     Date, Duration, OffsetDateTime, UtcOffset, format_description::{FormatItem, parse, well_known::Rfc3339}
 };
 
+use crate::file_utils::write_json_atomic;
+
 pub static SHORT_ISO_PARSER: Lazy<Vec<FormatItem<'_>>> =
     Lazy::new(|| parse("[year]-[month]-[day]").expect("Date format template is invalid!"));
 
@@ -21,10 +23,9 @@ pub trait EnsureDataParams<T> {
 /** Provides a mechanism for fetching data for multiple entities and caching data separately for each one */
 #[async_trait]
 pub trait EnsureBatchedDataParams<T> {
-    async fn get_fresh_data(&self, stale_data: &Vec<String>) -> HashMap<String, T>;
-    // fn get_symbols(&self) -> Vec<String>;
+    async fn get_fresh_data(&self, stale_data: &[String]) -> HashMap<String, T>;
     fn get_symbols(&self) -> &[String];
-    fn get_file_path(&self, symbol: &String) -> String;
+    fn get_file_path(&self, symbol: &str) -> String;
     fn get_time_until_cache_is_stale(&self) -> Duration;
 }
 
@@ -37,7 +38,6 @@ pub struct DataMeta {
 pub struct EnsureDataResult<T> {
     pub value: T,
     pub was_cached: bool,
-    pub last_updated: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -61,7 +61,6 @@ where
         return EnsureDataResult {
             value: cached_data.value,
             was_cached: true,
-            last_updated: cached_data.meta.last_updated,
         };
     }
 
@@ -74,15 +73,13 @@ where
         value: params.get_fresh_data(cached_data.map(|v| v.value)).await,
     };
 
-    let _ = fs::write(
-        params.get_file_path(),
-        serde_json::to_string_pretty(&fresh_data).unwrap(),
-    );
+    let path = params.get_file_path();
+    write_json_atomic(Path::new(&path), &fresh_data)
+        .unwrap_or_else(|error| panic!("Failed to write cache file {path}: {error:#}"));
 
     EnsureDataResult {
         value: fresh_data.value,
         was_cached: false,
-        last_updated: fresh_data.meta.last_updated,
     }
 }
 
@@ -105,7 +102,6 @@ where
         return EnsureDataResult {
             value: cached_data.value,
             was_cached: true,
-            last_updated: cached_data.meta.last_updated,
         };
     }
 
@@ -118,15 +114,13 @@ where
             .await,
     };
 
-    let _ = fs::write(
-        params.get_file_path(),
-        serde_json::to_string_pretty(&fresh_data).unwrap(),
-    );
+    let path = params.get_file_path();
+    write_json_atomic(Path::new(&path), &fresh_data)
+        .unwrap_or_else(|error| panic!("Failed to write cache file {path}: {error:#}"));
 
     EnsureDataResult {
         value: fresh_data.value,
         was_cached: false,
-        last_updated: fresh_data.meta.last_updated,
     }
 }
 
@@ -154,17 +148,17 @@ where
     log::trace!("ensure_data - cached data was not up to date, fetching new...");
     let fresh_batched_data = params.get_fresh_data(&stale_sector_symbols).await;
     for (symbol, data) in fresh_batched_data.into_iter() {
-        // TODO: Batch FS writes?
-        let _ = fs::write(
-            params.get_file_path(&symbol),
-            serde_json::to_string_pretty(&FileSystemData::<T> {
+        let path = params.get_file_path(&symbol);
+        write_json_atomic(
+            Path::new(&path),
+            &FileSystemData::<T> {
                 meta: DataMeta {
                     last_updated: last_updated.clone(),
                 },
                 value: data,
-            })
-            .unwrap(),
-        );
+            },
+        )
+        .unwrap_or_else(|error| panic!("Failed to write cache file {path}: {error:#}"));
     }
 
     // TODO: Parity with ensure_data method
@@ -184,13 +178,13 @@ fn get_time_ago(iso_time: &str) -> Duration {
         - OffsetDateTime::parse(iso_time, &Rfc3339).expect("Failed to parse date-time")
 }
 
-fn get_cached_data<T>(cached_path: &String) -> Option<FileSystemData<T>>
+fn get_cached_data<T>(cached_path: &str) -> Option<FileSystemData<T>>
 where
     T: DeserializeOwned,
 {
     log::trace!("get_cached_data - Searching for \"{}\"", cached_path);
 
-    let does_file_exist = Path::new(&cached_path).exists();
+    let does_file_exist = Path::new(cached_path).exists();
     if !does_file_exist {
         log::trace!("get_cached_data - Not found \"{}\"", cached_path);
         return None;
@@ -199,12 +193,12 @@ where
     log::trace!("get_cached_data - Found \"{}\"", cached_path);
 
     let file_contents = fs::read_to_string(cached_path)
-        .unwrap_or_else(|_| panic!("Failed to read file: {}", &cached_path));
+        .unwrap_or_else(|_| panic!("Failed to read file: {}", cached_path));
 
     let value: FileSystemData<T> = serde_json::from_str(&file_contents).unwrap_or_else(|error| {
         panic!(
             "Failed to deserialize file contents: {} \n {} \n {}",
-            file_contents, error, &cached_path
+            file_contents, error, cached_path
         )
     });
 
@@ -251,23 +245,15 @@ pub fn str_to_short_iso(date_str: &str) -> String {
         .expect("Failed to format date-time")
 }
 
-pub fn to_short_iso(date: &OffsetDateTime) -> String {
-    date.format(&SHORT_ISO_PARSER)
-        .expect("Failed to format date-time")
-        .to_string()
-}
-
 #[derive(Debug)]
 pub struct IngestSettings {
     pub sa_throttle_duration: std::time::Duration,
     pub sa_fetch_chunk_size: u16,
-    pub decimal_precision: u8,
 }
 
 pub const INGEST_SETTINGS: IngestSettings = IngestSettings {
     sa_throttle_duration: std::time::Duration::from_secs(180),
     sa_fetch_chunk_size: 200,
-    decimal_precision: 4,
 };
 
 #[cfg(test)]
@@ -337,6 +323,14 @@ mod tests {
         assert_eq!(cached.value.as_deref(), Some("fresh"));
         assert!(cached.was_cached);
         assert_eq!(fetch_count.load(Ordering::SeqCst), 1);
+        assert!(
+            !path
+                .with_file_name(format!(
+                    ".{}.tmp",
+                    path.file_name().unwrap().to_string_lossy()
+                ))
+                .exists()
+        );
 
         fs::remove_file(path).unwrap();
     }

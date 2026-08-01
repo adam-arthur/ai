@@ -14,7 +14,7 @@ pub async fn ensure_sectors(symbols: &[String]) -> bool {
 
     #[async_trait]
     impl EnsureBatchedDataParams<Sector> for EnsureBatchedSectorsParams<'_> {
-        async fn get_fresh_data(&self, stale_symbols: &Vec<String>) -> HashMap<String, Sector> {
+        async fn get_fresh_data(&self, stale_symbols: &[String]) -> HashMap<String, Sector> {
             log::debug!(
                 "Sectors - chunk has {} stale symbols...",
                 stale_symbols.len()
@@ -27,7 +27,7 @@ pub async fn ensure_sectors(symbols: &[String]) -> bool {
         fn get_symbols(&self) -> &[String] {
             self.symbols
         }
-        fn get_file_path(&self, symbol: &String) -> String {
+        fn get_file_path(&self, symbol: &str) -> String {
             format!(
                 "{}/sectors/{}.json",
                 get_app_data_path().as_path().display(),

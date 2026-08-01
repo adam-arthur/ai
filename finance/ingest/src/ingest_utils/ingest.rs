@@ -107,14 +107,11 @@ async fn populate_timeseries(tradable_symbols: &[SymbolMeta]) {
 
             let elapsed_time = OffsetDateTime::now_utc() - start_time;
             log::info!(
-                "Stock {} of {} ({}%) ({}s)",
+                "Stock {} of {} ({:.2}%) ({:.3}s)",
                 idx + 1,
                 tradable_symbols.len(),
-                format!(
-                    "{:.2}",
-                    100.0f32 * ((idx + 1) as f32 / tradable_symbols.len() as f32)
-                ),
-                format!("{:.3}", elapsed_time.as_seconds_f32())
+                100.0f32 * ((idx + 1) as f32 / tradable_symbols.len() as f32),
+                elapsed_time.as_seconds_f32()
             );
         })
         .await
