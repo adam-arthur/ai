@@ -531,6 +531,23 @@ pub struct PricePoint {
     pub open_price: f64,  // 17.68,
 }
 
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QuarterlyData {
+    pub end_date: String,
+    pub start_date: Option<String>,
+    pub fiscal_year: u16,
+    pub fiscal_quarter: u8,
+    pub calendar_quarter: u8,
+    pub calendar_year: u16,
+    pub earnings_per_share: Option<f64>,
+    pub earnings_per_share_normalized: Option<f64>,
+    pub ffo_per_share: Option<f64>,
+    pub revenue: Option<f64>,
+    // TODO: AFFO
+    // TODO: Add estimates
+}
+
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]

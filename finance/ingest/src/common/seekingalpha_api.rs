@@ -97,9 +97,10 @@ pub async fn fetch_quarterly_data(symbols: &[String]) -> HashMap<String, Vec<Qua
         return HashMap::new();
     }
 
-    // ffo_consensus_mean, revenue_consensus_mean,
+    // Reported revenue and GAAP EPS come from SEC Company Facts. Seeking Alpha remains
+    // the source for non-GAAP/REIT metrics and, later, consensus estimates.
     let url = format!(
-        "/symbol_data/estimates?period_type=quarterly&estimates_data_items=ffo_actual,revenue_actual,eps,eps_normalized&relative_periods=0,-1,-2,-3,-4,-5,-6,-7,-8,-9,-10,-11,-12,-13,-14,-15,-16,-17,-18,-19,-20,-21,-22,-23&ticker_ids={}",
+        "/symbol_data/estimates?period_type=quarterly&estimates_data_items=ffo_actual,eps_normalized&relative_periods=0,-1,-2,-3,-4,-5,-6,-7,-8,-9,-10,-11,-12,-13,-14,-15,-16,-17,-18,-19,-20,-21,-22,-23&ticker_ids={}",
         symbols.join(",")
     );
 
@@ -132,12 +133,10 @@ pub async fn fetch_quarterly_data(symbols: &[String]) -> HashMap<String, Vec<Qua
                     .expect("Quarter should exist since added in loop.");
 
                 match metric_name.as_str() {
-                    "eps" => quarter.earnings_per_share = Some(value.dataitemvalue),
                     "eps_normalized" => {
                         quarter.earnings_per_share_normalized = Some(value.dataitemvalue)
                     }
                     "ffo_actual" => quarter.ffo_per_share = Some(value.dataitemvalue),
-                    "revenue_actual" => quarter.revenue = Some(value.dataitemvalue),
                     _ => panic!("Unknown `metric_name` of {}", metric_name),
                 }
             }
@@ -186,20 +185,4 @@ where
         .unwrap_or_else(|error| panic!("Failed to deserialize JSON: {} \n {}", text_body, error)))
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct QuarterlyData {
-    pub end_date: String,
-    // Comes from prev quarter end_date, thus won't exist for first point.
-    pub start_date: Option<String>,
-    pub fiscal_year: u16,
-    pub fiscal_quarter: u8,
-    pub calendar_quarter: u8,
-    pub calendar_year: u16,
-    pub earnings_per_share: Option<f64>,
-    pub earnings_per_share_normalized: Option<f64>,
-    pub ffo_per_share: Option<f64>,
-    pub revenue: Option<f64>,
-    // TODO: AFFO
-    // TODO: Add on estimates
-}
+pub use crate::financials::models::QuarterlyData;

@@ -1,10 +1,15 @@
-use std::{collections::HashMap, env, num::NonZeroU32, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap}, env, num::NonZeroU32, time::Duration
+};
 
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, de::DeserializeOwned};
+use time::{Date, macros::format_description};
 
-use crate::{financials::models::Company, meta_utils::YieldWatchError};
+use crate::{
+    financials::models::{Company, QuarterlyData}, meta_utils::YieldWatchError
+};
 
 use super::HTTP;
 
@@ -56,6 +61,37 @@ struct SecAddress {
     country: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct SecCompanyFacts {
+    #[serde(default)]
+    facts: HashMap<String, HashMap<String, SecFact>>,
+}
+
+#[derive(Deserialize)]
+struct SecFact {
+    #[serde(default)]
+    units: HashMap<String, Vec<SecFactValue>>,
+}
+
+#[derive(Clone, Deserialize)]
+struct SecFactValue {
+    start: Option<String>,
+    end: String,
+    val: f64,
+    fy: Option<u16>,
+    fp: Option<String>,
+    form: String,
+    filed: String,
+}
+
+const REVENUE_CONCEPTS: &[&str] = &[
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "RevenueFromContractWithCustomerIncludingAssessedTax",
+    "Revenues",
+    "SalesRevenueNet",
+];
+const EPS_CONCEPTS: &[&str] = &["EarningsPerShareDiluted", "EarningsPerShareBasic"];
+
 pub async fn fetch_symbol_to_cik() -> HashMap<String, u64> {
     #[derive(Deserialize, Debug)]
     struct SecSymbol {
@@ -85,6 +121,147 @@ pub async fn fetch_company(symbol: &str, cik: &str) -> Result<Company, YieldWatc
         sec_data::<SecCompanySubmission>(format!("/submissions/CIK{padded_cik}.json")).await?;
 
     Ok(submission.into_company(symbol))
+}
+
+/// Fetches reported, quarter-only revenue and EPS from the SEC Company Facts API.
+///
+/// Company Facts also contains cumulative year-to-date observations. Those are excluded by
+/// selecting 10-Q facts whose duration is consistent with a single fiscal quarter. Fiscal Q4 EPS
+/// is intentionally not synthesized from annual EPS because the weighted-average share denominator
+/// makes subtraction invalid.
+#[allow(dead_code)]
+pub async fn fetch_reported_quarterly_data(
+    cik: &str,
+) -> Result<Vec<QuarterlyData>, YieldWatchError> {
+    let padded_cik = format!("{:0>10}", cik.trim_start_matches('0'));
+    let facts =
+        sec_data::<SecCompanyFacts>(format!("/api/xbrl/companyfacts/CIK{padded_cik}.json")).await?;
+
+    Ok(facts.into_reported_quarters())
+}
+
+impl SecCompanyFacts {
+    fn into_reported_quarters(self) -> Vec<QuarterlyData> {
+        let Some(us_gaap) = self.facts.get("us-gaap") else {
+            return Vec::new();
+        };
+        let mut quarters = BTreeMap::<(String, u16, u8), QuarterlyData>::new();
+
+        merge_concepts(
+            &mut quarters,
+            us_gaap,
+            REVENUE_CONCEPTS,
+            "USD",
+            |quarter, value| quarter.revenue = Some(value),
+        );
+        merge_concepts(
+            &mut quarters,
+            us_gaap,
+            EPS_CONCEPTS,
+            "USD/shares",
+            |quarter, value| quarter.earnings_per_share = Some(value),
+        );
+
+        quarters.into_values().collect()
+    }
+}
+
+fn merge_concepts(
+    quarters: &mut BTreeMap<(String, u16, u8), QuarterlyData>,
+    taxonomy: &HashMap<String, SecFact>,
+    concepts: &[&str],
+    unit: &str,
+    set_value: impl Fn(&mut QuarterlyData, f64) + Copy,
+) {
+    // Concepts are ordered from preferred to fallback. A fallback only fills periods that the
+    // preferred concept did not cover, which also handles issuers changing tags over time.
+    for concept in concepts {
+        let Some(values) = taxonomy.get(*concept).and_then(|fact| fact.units.get(unit)) else {
+            continue;
+        };
+
+        for value in current_quarter_facts(values) {
+            let fiscal_year = value.fy.expect("validated SEC fact has a fiscal year");
+            let fiscal_quarter =
+                fiscal_quarter(&value.fp).expect("validated SEC fact has a fiscal quarter");
+            let key = (value.end.clone(), fiscal_year, fiscal_quarter);
+            let quarter = quarters.entry(key).or_insert_with(|| {
+                let end = parse_sec_date(&value.end).expect("validated SEC fact has a valid end");
+                QuarterlyData {
+                    end_date: value.end.clone(),
+                    start_date: value.start.clone(),
+                    fiscal_year,
+                    fiscal_quarter,
+                    calendar_year: end.year() as u16,
+                    calendar_quarter: (u8::from(end.month()) - 1) / 3 + 1,
+                    ..Default::default()
+                }
+            });
+
+            let already_set = if unit == "USD" {
+                quarter.revenue.is_some()
+            } else {
+                quarter.earnings_per_share.is_some()
+            };
+            if !already_set {
+                set_value(quarter, value.val);
+            }
+        }
+    }
+}
+
+fn current_quarter_facts(values: &[SecFactValue]) -> Vec<&SecFactValue> {
+    let mut by_period = BTreeMap::<(String, u16, u8), &SecFactValue>::new();
+
+    for value in values.iter().filter(|value| is_current_quarter_fact(value)) {
+        let key = (
+            value.end.clone(),
+            value.fy.expect("validated SEC fact has a fiscal year"),
+            fiscal_quarter(&value.fp).expect("validated SEC fact has a fiscal quarter"),
+        );
+        let replace = by_period
+            .get(&key)
+            .is_none_or(|existing| value.filed > existing.filed);
+        if replace {
+            by_period.insert(key, value);
+        }
+    }
+
+    by_period.into_values().collect()
+}
+
+fn is_current_quarter_fact(value: &SecFactValue) -> bool {
+    if !matches!(value.form.as_str(), "10-Q" | "10-Q/A")
+        || value.fy.is_none()
+        || fiscal_quarter(&value.fp).is_none()
+    {
+        return false;
+    }
+
+    let (Some(start), Some(end), Some(filed)) = (
+        value.start.as_deref().and_then(parse_sec_date),
+        parse_sec_date(&value.end),
+        parse_sec_date(&value.filed),
+    ) else {
+        return false;
+    };
+    let duration_days = (end - start).whole_days();
+    let filing_delay_days = (filed - end).whole_days();
+
+    (45..=150).contains(&duration_days) && (0..=180).contains(&filing_delay_days)
+}
+
+fn fiscal_quarter(fp: &Option<String>) -> Option<u8> {
+    match fp.as_deref() {
+        Some("Q1") => Some(1),
+        Some("Q2") => Some(2),
+        Some("Q3") => Some(3),
+        _ => None,
+    }
+}
+
+fn parse_sec_date(value: &str) -> Option<Date> {
+    Date::parse(value, format_description!("[year]-[month]-[day]")).ok()
 }
 
 impl SecCompanySubmission {
@@ -228,5 +405,92 @@ mod tests {
                 "fiscalYearEnd": "0927"
             })
         );
+    }
+
+    #[test]
+    fn company_facts_maps_only_reported_single_quarter_revenue_and_eps() {
+        let facts = serde_json::from_value::<SecCompanyFacts>(json!({
+            "facts": {
+                "us-gaap": {
+                    "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                        "units": { "USD": [
+                            {
+                                "start": "2025-01-01", "end": "2025-03-31", "val": 100.0,
+                                "fy": 2025, "fp": "Q1", "form": "10-Q", "filed": "2025-05-01"
+                            },
+                            {
+                                "start": "2025-01-01", "end": "2025-06-30", "val": 230.0,
+                                "fy": 2025, "fp": "Q2", "form": "10-Q", "filed": "2025-08-01"
+                            },
+                            {
+                                "start": "2025-04-01", "end": "2025-06-30", "val": 125.0,
+                                "fy": 2025, "fp": "Q2", "form": "10-Q", "filed": "2025-08-01"
+                            },
+                            {
+                                "start": "2025-04-01", "end": "2025-06-30", "val": 130.0,
+                                "fy": 2025, "fp": "Q2", "form": "10-Q/A", "filed": "2025-08-15"
+                            },
+                            {
+                                "start": "2025-01-01", "end": "2025-12-31", "val": 500.0,
+                                "fy": 2025, "fp": "FY", "form": "10-K", "filed": "2026-02-01"
+                            }
+                        ]}
+                    },
+                    "Revenues": {
+                        "units": { "USD": [{
+                            "start": "2025-07-01", "end": "2025-09-30", "val": 140.0,
+                            "fy": 2025, "fp": "Q3", "form": "10-Q", "filed": "2025-11-01"
+                        }]}
+                    },
+                    "EarningsPerShareDiluted": {
+                        "units": { "USD/shares": [{
+                            "start": "2025-01-01", "end": "2025-03-31", "val": 1.25,
+                            "fy": 2025, "fp": "Q1", "form": "10-Q", "filed": "2025-05-01"
+                        }]}
+                    },
+                    "EarningsPerShareBasic": {
+                        "units": { "USD/shares": [
+                            {
+                                "start": "2025-01-01", "end": "2025-03-31", "val": 1.30,
+                                "fy": 2025, "fp": "Q1", "form": "10-Q", "filed": "2025-05-01"
+                            },
+                            {
+                                "start": "2025-04-01", "end": "2025-06-30", "val": 1.40,
+                                "fy": 2025, "fp": "Q2", "form": "10-Q", "filed": "2025-08-01"
+                            }
+                        ]}
+                    }
+                },
+                "dei": {}
+            }
+        }))
+        .unwrap();
+
+        let quarters = facts.into_reported_quarters();
+
+        assert_eq!(quarters.len(), 3);
+        assert_eq!(quarters[0].start_date.as_deref(), Some("2025-01-01"));
+        assert_eq!(quarters[0].revenue, Some(100.0));
+        assert_eq!(quarters[0].earnings_per_share, Some(1.25));
+        assert_eq!(quarters[0].calendar_quarter, 1);
+        assert_eq!(quarters[1].revenue, Some(130.0));
+        assert_eq!(quarters[1].earnings_per_share, Some(1.40));
+        assert_eq!(quarters[2].revenue, Some(140.0));
+        assert_eq!(quarters[2].earnings_per_share, None);
+    }
+
+    #[test]
+    fn company_facts_ignores_late_comparative_periods() {
+        let value = SecFactValue {
+            start: Some("2024-01-01".into()),
+            end: "2024-03-31".into(),
+            val: 10.0,
+            fy: Some(2025),
+            fp: Some("Q1".into()),
+            form: "10-Q".into(),
+            filed: "2025-05-01".into(),
+        };
+
+        assert!(!is_current_quarter_fact(&value));
     }
 }
