@@ -7,7 +7,7 @@ use crate::{
     common::alpaca_api::fetch_historical_prices, financials::models::PricePoint, ingest_utils::common::{EnsureDataParams, ensure_data, from_short_iso, to_iso}, meta_utils::get_app_data_path
 };
 
-use super::common::EnsureDataResult;
+use super::{DATA_FETCH_START_DATE, common::EnsureDataResult};
 
 pub async fn ensure_prices(symbol: &String) -> EnsureDataResult<Vec<PricePoint>> {
     struct EnsurePricesParams {
@@ -47,7 +47,7 @@ pub async fn ensure_prices(symbol: &String) -> EnsureDataResult<Vec<PricePoint>>
 
                     fetch_historical_prices(
                         self.symbol.clone(),
-                        "2015-01-01".into(), // Arbitrary early date
+                        DATA_FETCH_START_DATE.to_string(),
                         to_iso(&OffsetDateTime::now_utc()),
                     )
                     .await

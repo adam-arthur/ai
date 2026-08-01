@@ -6,7 +6,7 @@ use crate::{
     common::treasury_api::{fetch_treasury_rate_history, fetch_treasury_rates}, file_utils::write_json_atomic, financials::models::{TreasuryDuration, TreasuryRate}, ingest_utils::common::{DataMeta, FileSystemData, get_cached_data, is_stale}, meta_utils::get_app_data_path
 };
 
-const TREASURY_HISTORY_START_YEAR: i32 = 2016;
+use super::DATA_FETCH_START_DATE;
 
 pub async fn ensure_treasury_rates() {
     let mut cached = TreasuryDuration::ALL
@@ -38,7 +38,7 @@ pub async fn ensure_treasury_rates() {
     let mut fresh = if has_complete_cache {
         fetch_treasury_rates(&format!("{:04}{:02}", now.year(), u8::from(now.month()))).await
     } else {
-        fetch_treasury_rate_history(TREASURY_HISTORY_START_YEAR, now.year()).await
+        fetch_treasury_rate_history(DATA_FETCH_START_DATE.year(), now.year()).await
     }
     .unwrap_or_else(|error| panic!("Failed to fetch Treasury rates: {error:#}"));
     let last_updated = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();

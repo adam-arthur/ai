@@ -5,9 +5,7 @@ use crate::{
     common::ecb_api::fetch_exchange_rates, financials::models::ExchangeRateSnapshot, ingest_utils::common::{EnsureDataParams, ensure_data}, meta_utils::get_app_data_path
 };
 
-use super::common::EnsureDataResult;
-
-const EXCHANGE_RATE_HISTORY_START: &str = "2016-01-01";
+use super::{DATA_FETCH_START_DATE, common::EnsureDataResult};
 
 pub async fn ensure_exchange_rates() -> EnsureDataResult<Vec<ExchangeRateSnapshot>> {
     struct EnsureExchangeRates;
@@ -29,7 +27,7 @@ pub async fn ensure_exchange_rates() -> EnsureDataResult<Vec<ExchangeRateSnapsho
                 }
             );
 
-            let fresh_data = fetch_exchange_rates(start_period)
+            let fresh_data = fetch_exchange_rates(&start_period)
                 .await
                 .unwrap_or_else(|error| panic!("Failed to fetch ECB exchange rates: {error:#}"));
 
@@ -61,12 +59,11 @@ pub async fn ensure_exchange_rates() -> EnsureDataResult<Vec<ExchangeRateSnapsho
     data
 }
 
-fn exchange_rate_start_period(snapshots: &[ExchangeRateSnapshot]) -> &str {
-    snapshots
-        .last()
-        .map_or(EXCHANGE_RATE_HISTORY_START, |snapshot| {
-            snapshot.as_of.as_str()
-        })
+fn exchange_rate_start_period(snapshots: &[ExchangeRateSnapshot]) -> String {
+    snapshots.last().map_or_else(
+        || DATA_FETCH_START_DATE.to_string(),
+        |snapshot| snapshot.as_of.clone(),
+    )
 }
 
 fn merge_exchange_rates(
@@ -103,7 +100,10 @@ mod tests {
 
     #[test]
     fn starts_exchange_rate_history_in_2016() {
-        assert_eq!(exchange_rate_start_period(&[]), "2016-01-01");
+        assert_eq!(
+            exchange_rate_start_period(&[]),
+            DATA_FETCH_START_DATE.to_string()
+        );
     }
 
     #[test]

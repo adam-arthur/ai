@@ -5,7 +5,9 @@ use crate::{
     common::alpaca_api::{CorporateActions, fetch_corporate_actions, merge_corporate_actions}, ingest_utils::common::ensure_data, meta_utils::get_app_data_path
 };
 
-use super::common::{EnsureDataParams, EnsureDataResult};
+use super::{
+    DATA_FETCH_START_DATE, common::{EnsureDataParams, EnsureDataResult}
+};
 
 pub async fn ensure_corporate_actions(symbol: &String) -> EnsureDataResult<Vec<CorporateActions>> {
     struct EnsureCorporateActionsParams {
@@ -37,7 +39,7 @@ pub async fn ensure_corporate_actions(symbol: &String) -> EnsureDataResult<Vec<C
                         "{} - Corporate Actions - fetching fresh data...",
                         self.symbol
                     );
-                    fetch_corporate_actions(&self.symbol, "2015-01-01").await
+                    fetch_corporate_actions(&self.symbol, &DATA_FETCH_START_DATE.to_string()).await
                 }
             }
         }

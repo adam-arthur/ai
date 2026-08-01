@@ -14,6 +14,8 @@ mod ingest;
 
 use std::fs::create_dir_all;
 
+use time::{Date, Month};
+
 use crate::meta_utils::get_app_data_path;
 
 use ensure_company::ensure_company;
@@ -24,6 +26,11 @@ use ensure_prices::ensure_prices;
 use ensure_sectors::ensure_sectors;
 use ensure_tradable_symbols::ensure_tradable_symbols;
 use ensure_treasury_rates::ensure_treasury_rates;
+
+pub const DATA_FETCH_START_DATE: Date = match Date::from_calendar_date(2016, Month::January, 1) {
+    Ok(date) => date,
+    Err(_) => panic!("data fetch start date is invalid"),
+};
 
 fn ensure_data_folders() {
     let paths = [
