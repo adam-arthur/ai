@@ -489,6 +489,30 @@ pub(super) async fn fetch_sec_text(url: &str) -> Result<String, YieldWatchError>
         .await?)
 }
 
+/// Downloads an SEC-hosted document as bytes using the shared fair-access controls.
+///
+/// Filing exhibits are not necessarily UTF-8 HTML (supplemental reports are sometimes PDFs), so
+/// callers that archive source documents must not pass them through [`fetch_sec_text`].
+pub(super) async fn fetch_sec_document(
+    url: &str,
+) -> Result<(Vec<u8>, Option<String>), YieldWatchError> {
+    SEC_API_RATE_LIMITER.until_ready().await;
+
+    let response = HTTP
+        .get(url)
+        .header("User-Agent", SEC_USER_AGENT.as_str())
+        .send()
+        .await?
+        .error_for_status()?;
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+
+    Ok((response.bytes().await?.to_vec(), content_type))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
