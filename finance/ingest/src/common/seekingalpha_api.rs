@@ -167,7 +167,6 @@ where
         url
     )
     .header("Referer", "https://seekingalpha.com")
-    .header("Origin", "https://seekingalpha.com")
     .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
     .send()
     .await?;
@@ -176,7 +175,7 @@ where
 
     let text_body = response.text().await.unwrap();
 
-    // AIf you get this, solve the captcha in a browser
+    // If you get this, solve the captcha in a browser
     if text_body.contains("blockScript") {
         panic!("SeekingAlpha - captcha");
     }
