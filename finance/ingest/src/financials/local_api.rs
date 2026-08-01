@@ -1,5 +1,6 @@
-use std::{fs::File, io::BufReader};
+use std::{fs::File, io::BufReader, path::Path};
 
+use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 
 use crate::{
@@ -8,54 +9,49 @@ use crate::{
 
 use super::models::{PricePoint, Sector, SymbolMeta};
 
-// ADAMTODO: move all to tokio/async
-pub async fn read_tradable_symbols() -> Vec<SymbolMeta> {
-    deserialize_json_file::<FileSystemData<Vec<SymbolMeta>>>(
-        get_app_data_path()
-            .join("tradableSymbols.json")
-            .to_str()
-            .unwrap(),
-    )
-    .value
+pub fn read_tradable_symbols() -> Result<Vec<SymbolMeta>> {
+    read_tradable_symbols_from(get_app_data_path())
 }
 
-pub async fn read_prices(symbol: &str) -> Vec<PricePoint> {
-    deserialize_json_file::<FileSystemData<Vec<PricePoint>>>(
-        get_app_data_path()
-            .join(format!("/prices/{}.json", symbol))
-            .to_str()
-            .unwrap(),
-    )
-    .value
+pub fn read_tradable_symbols_from(data_path: &Path) -> Result<Vec<SymbolMeta>> {
+    Ok(deserialize_json_file::<FileSystemData<Vec<SymbolMeta>>>(
+        &data_path.join("tradableSymbols.json"),
+    )?
+    .value)
+}
+
+pub fn read_prices_from(data_path: &Path, symbol: &str) -> Result<Vec<PricePoint>> {
+    Ok(deserialize_json_file::<FileSystemData<Vec<PricePoint>>>(
+        &data_path.join("prices").join(format!("{symbol}.json")),
+    )?
+    .value)
 }
 
 // ADAMTODO: Rethink corporate action structure
-pub async fn read_corporate_actions(symbol: &str) -> Vec<CorporateActions> {
-    deserialize_json_file::<FileSystemData<Vec<CorporateActions>>>(
-        get_app_data_path()
-            .join(format!("/corporateActions/{}.json", symbol))
-            .to_str()
-            .unwrap(),
+pub fn read_corporate_actions_from(
+    data_path: &Path,
+    symbol: &str,
+) -> Result<Vec<CorporateActions>> {
+    Ok(
+        deserialize_json_file::<FileSystemData<Vec<CorporateActions>>>(
+            &data_path
+                .join("corporateActions")
+                .join(format!("{symbol}.json")),
+        )?
+        .value,
     )
-    .value
 }
 
-pub async fn read_sector(symbol: &str) -> Sector {
-    deserialize_json_file::<FileSystemData<Sector>>(
-        get_app_data_path()
-            .join(format!("/sectors/{}.json", symbol))
-            .to_str()
-            .unwrap(),
-    )
-    .value
+pub fn read_sector_from(data_path: &Path, symbol: &str) -> Result<Sector> {
+    Ok(deserialize_json_file::<FileSystemData<Sector>>(
+        &data_path.join("sectors").join(format!("{symbol}.json")),
+    )?
+    .value)
 }
 
-fn deserialize_json_file<T: DeserializeOwned>(path: &str) -> T {
-    let file = File::open(path).unwrap_or_else(|err| {
-        panic!("Failed to open file {}: {}", path, err);
-    });
+fn deserialize_json_file<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let reader = BufReader::new(file);
-    serde_json::from_reader(reader).unwrap_or_else(|err| {
-        panic!("Failed to deserialize JSON from file {}: {}", path, err);
-    })
+    serde_json::from_reader(reader)
+        .with_context(|| format!("failed to deserialize {}", path.display()))
 }

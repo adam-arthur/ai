@@ -5,14 +5,21 @@ static APP_DATA_PATH: OnceLock<PathBuf> = OnceLock::new();
 pub fn get_app_data_path() -> &'static PathBuf {
     APP_DATA_PATH.get_or_init(|| {
         let relative_data_dir = env::var("DATA_DIR").expect("'DATA_DIR' not set!");
-        return env::current_dir()
-            .expect("Failed to get current working directory")
-            .join(&relative_data_dir)
-            .canonicalize()
-            .expect(&format!(
+        let current_dir = env::current_dir().expect("Failed to get current working directory");
+        let direct_path = current_dir.join(&relative_data_dir);
+        let package_relative_path = current_dir.join("ingest").join(&relative_data_dir);
+        let data_path = if direct_path.exists() {
+            direct_path
+        } else {
+            package_relative_path
+        };
+
+        data_path.canonicalize().unwrap_or_else(|_| {
+            panic!(
                 "'DATA_DIR' - Failed to find relative path: {}",
-                &relative_data_dir
-            ));
+                relative_data_dir
+            )
+        })
     })
 }
 

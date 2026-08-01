@@ -1,8 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet}, env, num::NonZeroU32, time::Duration
+};
 
+use governor::{Quota, RateLimiter};
 use itertools::{Itertools, chain};
+use once_cell::sync::Lazy;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use strum_macros::{Display, EnumString};
+use tokio::time::sleep;
 
 use crate::{
     common::ALPACA,
@@ -12,6 +18,24 @@ use crate::{
 };
 
 use super::HTTP;
+
+const DEFAULT_ALPACA_REQUESTS_PER_MINUTE: u32 = 9_000;
+const ALPACA_MAX_RETRIES: u32 = 5;
+
+static ALPACA_API_RATE_LIMITER: Lazy<
+    RateLimiter<
+        governor::state::NotKeyed,
+        governor::state::InMemoryState,
+        governor::clock::DefaultClock,
+    >,
+> = Lazy::new(|| {
+    let requests_per_minute = env::var("ALPACA_REQUESTS_PER_MINUTE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .and_then(NonZeroU32::new)
+        .unwrap_or(NonZeroU32::new(DEFAULT_ALPACA_REQUESTS_PER_MINUTE).unwrap());
+    RateLimiter::direct(Quota::per_minute(requests_per_minute))
+});
 
 pub struct AlpacaClientArgs {
     pub key: String,
@@ -66,41 +90,73 @@ impl AlpacaClient {
     where
         T: DeserializeOwned,
     {
-        let response = HTTP
-            .get(url)
-            .query(query_params)
-            .header("Apca-Api-Key-Id", &self.key)
-            .header("Apca-Api-Secret-Key", &self.secret)
-            .send()
-            .await
-            .unwrap();
+        for attempt in 0..=ALPACA_MAX_RETRIES {
+            ALPACA_API_RATE_LIMITER.until_ready().await;
+            let response = HTTP
+                .get(url)
+                .query(query_params)
+                .header("Apca-Api-Key-Id", &self.key)
+                .header("Apca-Api-Secret-Key", &self.secret)
+                .send()
+                .await;
 
-        log::debug!(
-            "Alpaca API - {} - \"{}\" Params: {:?}",
-            response.status().as_str(),
-            url,
-            query_params,
-        );
+            let response = match response {
+                Ok(response) => response,
+                Err(error) if attempt < ALPACA_MAX_RETRIES => {
+                    let delay = retry_delay(attempt, None);
+                    log::warn!(
+                        "Alpaca request failed (attempt {}): {}; retrying in {:.1}s",
+                        attempt + 1,
+                        error,
+                        delay.as_secs_f32()
+                    );
+                    sleep(delay).await;
+                    continue;
+                }
+                Err(error) => panic!("Alpaca request failed after retries: {error}"),
+            };
 
-        if !response.status().is_success() {
-            panic!(
-                "Alpaca Status: {} - Content: {}",
-                response.status(),
-                response
-                    .text()
-                    .await
-                    .expect("Failed to parse response body")
+            let status = response.status();
+            log::debug!(
+                "Alpaca API - {} - \"{}\" Params: {:?}",
+                status.as_str(),
+                url,
+                query_params,
             );
-        }
 
-        let json_body_result = response.json::<T>().await;
-
-        match json_body_result {
-            Ok(json_body) => json_body,
-            Err(error) => {
-                panic!("Alpaca: Failed to parse JSON response: {}", error)
+            if status.is_success() {
+                return response.json::<T>().await.unwrap_or_else(|error| {
+                    panic!("Alpaca: Failed to parse JSON response: {error}")
+                });
             }
+
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(Duration::from_secs);
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|error| format!("failed to read response body: {error}"));
+            let is_retryable = status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+            if is_retryable && attempt < ALPACA_MAX_RETRIES {
+                let delay = retry_delay(attempt, retry_after);
+                log::warn!(
+                    "Alpaca returned {} (attempt {}); retrying in {:.1}s",
+                    status,
+                    attempt + 1,
+                    delay.as_secs_f32()
+                );
+                sleep(delay).await;
+                continue;
+            }
+
+            panic!("Alpaca Status: {status} - Content: {body}");
         }
+
+        unreachable!("Alpaca retry loop always returns or panics")
     }
 
     pub async fn get_assets(&self, args: &GetAssetsArgs) -> Vec<Asset> {
@@ -141,6 +197,10 @@ impl AlpacaClient {
     //     )
     //     .await
     // }
+}
+
+fn retry_delay(attempt: u32, retry_after: Option<Duration>) -> Duration {
+    retry_after.unwrap_or_else(|| Duration::from_secs(2u64.pow(attempt.min(5))))
 }
 
 #[derive(Deserialize)]

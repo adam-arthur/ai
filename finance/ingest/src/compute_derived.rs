@@ -1,16 +1,18 @@
 use std::{
-    collections::BTreeMap, fs::{self, File}, io::{BufReader, BufWriter, Write}, path::{Path, PathBuf}
+    collections::BTreeMap, fs::{self, File}, io::{BufReader, BufWriter, Write}, path::{Path, PathBuf}, time::Instant
 };
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use common::Stock;
+use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    financials::{
-        local_api::{read_corporate_actions, read_prices, read_sector, read_tradable_symbols}, models::SymbolMeta
+    common::alpaca_api::CorporateActions, financials::{
+        local_api::{
+            read_corporate_actions_from, read_prices_from, read_sector_from, read_tradable_symbols
+        }, models::{Exchange, PricePoint, SECTORID_TO_NAME, Sector, SymbolMeta}
     }, ingest_utils::is_valid_symbol, meta_utils::get_app_data_path
 };
 
@@ -30,13 +32,14 @@ struct Cli {
     /// Update meta information
     #[arg(long = "update-meta", default_value_t = false)]
     update_meta: bool,
+
+    /// Number of derived stocks to build concurrently (0 uses available parallelism)
+    #[arg(short = 'p', long = "parallelism", default_value_t = 0)]
+    parallelism: usize,
 }
 struct ComputeDerivedOptions {
     /// Skip any failed stocks
     bypass_failures: bool,
-
-    /// Numerical precision for number outputs
-    populate_precision: u8,
 
     /// Whether to remove the existing derived data before running
     remove_existing: bool,
@@ -46,6 +49,9 @@ struct ComputeDerivedOptions {
 
     /// Whether to update metadata
     update_meta: bool,
+
+    /// Number of derived stocks to build concurrently
+    parallelism: usize,
 }
 
 pub async fn compute_derived() {
@@ -58,11 +64,10 @@ pub async fn compute_derived() {
 
     let options = ComputeDerivedOptions {
         bypass_failures: true, // Weed out any stocks with missing constituent data
-        populate_precision: 4,
-
         remove_existing: args.remove_existing,
         update_stocks: args.update_stocks,
         update_meta: args.update_meta,
+        parallelism: resolve_parallelism(args.parallelism),
     };
 
     log::info!("Compute Derived - Populating...");
@@ -82,25 +87,32 @@ pub async fn compute_derived() {
 
     if options.update_stocks {
         let tradable_symbols = read_tradable_symbols()
-            .await
+            .unwrap_or_else(|error| panic!("Failed to read tradable symbols: {error:#}"))
             .into_iter()
             .filter(|v| is_valid_symbol(&v.symbol))
             .collect::<Vec<SymbolMeta>>();
+        let report = populate_symbols(
+            tradable_symbols,
+            get_app_data_path().clone(),
+            derived_stock_data_path.clone(),
+            options.parallelism,
+            options.bypass_failures,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("Failed to update derived stocks: {error:#}"));
 
-        // TODO:
-        // const exchangeRates: ExchangeRate[] = await readExchangeRates()
-
-        //         // ADAM HERE https://www.sec.gov/cgi-bcin/viewer?action=view&cik=0001025378&accession_number=0001025378-22-000041&xbrl_type=v#
-        //         // TODO: parallelize, not using full CPU
-        //         // num batches from cli
-
-        // await populateSymbols({
-        //     symbols: tradableSymbols,
-        //     fromCurrencyToRate: exchangeRates.reduce((fromCurrencyToRate, rate) => {
-        //         fromCurrencyToRate[rate.from] = rate.rate
-        //         return fromCurrencyToRate
-        //     }, {}) as Record<Currency, number>
-        // })
+        log::info!(
+            "Derived stocks - populated {} stocks with {} failures",
+            report.populated,
+            report.failures.len()
+        );
+        for failure in report.failures {
+            log::error!(
+                "{} - Failed to populate derived stock: {:#}",
+                failure.symbol,
+                failure.cause
+            );
+        }
     } else {
         log::info!("Compute Derived - Skipping stocks...");
     }
@@ -117,6 +129,75 @@ pub async fn compute_derived() {
     //     options,
     //     failedSymbols: []
     // }
+}
+
+fn resolve_parallelism(requested: usize) -> usize {
+    if requested > 0 {
+        return requested;
+    }
+
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DerivedStock {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cik: Option<String>,
+    symbol: String,
+    name: String,
+    exchange: Exchange,
+    is_easy_to_borrow: bool,
+    is_shortable: bool,
+    is_fractionable: bool,
+    sector: DerivedSector,
+    corporate_actions: Vec<CorporateActions>,
+    historical_prices: Vec<PricePoint>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DerivedSector {
+    symbol: String,
+    sector_name: Option<String>,
+    industry_group_name: Option<String>,
+    industry_name: Option<String>,
+    sub_industry_name: Option<String>,
+    sub_industry_gics: Option<u64>,
+}
+
+impl From<Sector> for DerivedSector {
+    fn from(sector: Sector) -> Self {
+        let sub_industry_gics = sector.sub_industry_gics;
+        let name_for = |divisor: u64| {
+            sub_industry_gics
+                .and_then(|gics| u32::try_from(gics / divisor).ok())
+                .and_then(|gics| SECTORID_TO_NAME.get(&gics))
+                .map(|name| (*name).to_owned())
+        };
+
+        Self {
+            symbol: sector.symbol,
+            sector_name: name_for(1_000_000),
+            industry_group_name: name_for(10_000),
+            industry_name: name_for(100),
+            sub_industry_name: name_for(1),
+            sub_industry_gics,
+        }
+    }
+}
+
+struct PopulateFailure {
+    symbol: String,
+    cause: anyhow::Error,
+}
+
+struct PopulateReport {
+    populated: usize,
+    failures: Vec<PopulateFailure>,
 }
 
 #[derive(Deserialize)]
@@ -328,6 +409,30 @@ fn write_pretty_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     Ok(())
 }
 
+fn write_pretty_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let file_name = path
+        .file_name()
+        .with_context(|| format!("path has no file name: {}", path.display()))?
+        .to_string_lossy();
+    let temporary_path = path.with_file_name(format!(".{file_name}.tmp"));
+
+    if let Err(error) = write_pretty_json(&temporary_path, value) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temporary_path, path) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error).with_context(|| {
+            format!(
+                "failed to replace {} with {}",
+                path.display(),
+                temporary_path.display()
+            )
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -464,6 +569,136 @@ mod tests {
         assert!(error.to_string().contains("run with --update-stocks first"));
     }
 
+    #[test]
+    fn derived_stock_is_built_from_cached_inputs() {
+        let test_root = temporary_test_path();
+        let derived_stock_data_path = test_root.join("derived/stocks");
+        write_stock_fixtures(&test_root, "AAPL", true);
+        fs::create_dir_all(&derived_stock_data_path).unwrap();
+
+        populate_derived_stock(&test_root, &derived_stock_data_path, symbol_meta("AAPL")).unwrap();
+
+        let stock: Value =
+            serde_json::from_reader(File::open(derived_stock_data_path.join("AAPL.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            stock,
+            json!({
+                "cik": "320193",
+                "symbol": "AAPL",
+                "name": "Apple Inc.",
+                "exchange": "NASDAQ",
+                "isEasyToBorrow": true,
+                "isShortable": true,
+                "isFractionable": true,
+                "sector": {
+                    "symbol": "AAPL",
+                    "sectorName": "Information Technology",
+                    "industryGroupName": "Technology Hardware & Equipment",
+                    "industryName": "Technology Hardware, Storage & Peripherals",
+                    "subIndustryName": "Technology Hardware, Storage & Peripherals",
+                    "subIndustryGics": 45202030
+                },
+                "corporateActions": [],
+                "historicalPrices": [{
+                    "date": "2024-01-02",
+                    "volume": 100,
+                    "closePrice": 10.0,
+                    "highPrice": 11.0,
+                    "lowPrice": 9.0,
+                    "openPrice": 9.5
+                }]
+            })
+        );
+        assert!(!derived_stock_data_path.join(".AAPL.json.tmp").exists());
+
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn populate_symbols_reports_failures_and_keeps_existing_files() {
+        let test_root = temporary_test_path();
+        let derived_stock_data_path = test_root.join("derived/stocks");
+        write_stock_fixtures(&test_root, "AAA", true);
+        write_stock_fixtures(&test_root, "BBB", false);
+        fs::create_dir_all(&derived_stock_data_path).unwrap();
+        let existing_path = derived_stock_data_path.join("BBB.json");
+        fs::write(&existing_path, r#"{"existing":true}"#).unwrap();
+
+        let report = populate_symbols(
+            vec![symbol_meta("AAA"), symbol_meta("BBB")],
+            test_root.clone(),
+            derived_stock_data_path.clone(),
+            2,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.populated, 1);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].symbol, "BBB");
+        assert_eq!(
+            fs::read_to_string(existing_path).unwrap(),
+            r#"{"existing":true}"#
+        );
+
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    fn symbol_meta(symbol: &str) -> SymbolMeta {
+        SymbolMeta {
+            symbol: symbol.to_owned(),
+            cik: Some("320193".to_owned()),
+            name: "Apple Inc.".to_owned(),
+            exchange: Exchange::NASDAQ,
+            is_easy_to_borrow: true,
+            is_shortable: true,
+            is_fractionable: true,
+        }
+    }
+
+    fn write_stock_fixtures(test_root: &Path, symbol: &str, include_sector: bool) {
+        fs::create_dir_all(test_root.join("prices")).unwrap();
+        fs::create_dir_all(test_root.join("corporateActions")).unwrap();
+        fs::create_dir_all(test_root.join("sectors")).unwrap();
+        write_cached_value(
+            &test_root.join("prices").join(format!("{symbol}.json")),
+            json!([{
+                "date": "2024-01-02",
+                "volume": 100,
+                "closePrice": 10.0,
+                "highPrice": 11.0,
+                "lowPrice": 9.0,
+                "openPrice": 9.5
+            }]),
+        );
+        write_cached_value(
+            &test_root
+                .join("corporateActions")
+                .join(format!("{symbol}.json")),
+            json!([]),
+        );
+        if include_sector {
+            write_cached_value(
+                &test_root.join("sectors").join(format!("{symbol}.json")),
+                json!({ "symbol": symbol, "subIndustryGics": 45202030 }),
+            );
+        }
+    }
+
+    fn write_cached_value(path: &Path, value: Value) {
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&json!({
+                "meta": { "last_updated": "2024-01-02T00:00:00Z" },
+                "value": value
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
     fn temporary_test_path() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -506,50 +741,66 @@ mod tests {
 //     }
 // }
 
-async fn populate_symbols(symbols: Vec<SymbolMeta>) {
-    //     {
-    //     symbols,
-    //     fromCurrencyToRate,
-    // }: {
-    //     symbols: SymbolMeta[]
-    //     fromCurrencyToRate: Record<Currency, number>
-    // }) {
-    let i = 0;
-    for symbol_meta in symbols {
-        // const startTime = Date.now()
-        log::info!("{} - Populating derived stock...", symbol_meta.symbol);
-
-        let _ = populate_derived_stock(
-            symbol_meta, // {
-                         // symbolMeta,
-                         // fromCurrencyToRate,
-                         // }
+async fn populate_symbols(
+    symbols: Vec<SymbolMeta>,
+    data_path: PathBuf,
+    derived_stock_data_path: PathBuf,
+    parallelism: usize,
+    bypass_failures: bool,
+) -> Result<PopulateReport> {
+    fs::create_dir_all(&derived_stock_data_path).with_context(|| {
+        format!(
+            "failed to create derived stock directory {}",
+            derived_stock_data_path.display()
         )
-        .await;
-        // try {
-        //     await populateDerivedStock({
-        //         symbolMeta,
-        //         fromCurrencyToRate,
-        //     })
-        // }
-        // catch (e: any) {
-        //     console.error(e)
-        //     console.error(`${symbolMeta.symbol} - Failed to process, ${options.bypassFailures ? 'skipping' : 'canceling'}...`)
+    })?;
 
-        //     populateReport.failedSymbols.push({ symbol: symbolMeta.symbol, cause: e.message })
+    let total = symbols.len();
+    let mut completed = 0;
+    let mut populated = 0;
+    let mut failures = Vec::new();
+    let started_at = Instant::now();
+    let mut jobs = stream::iter(symbols.into_iter().map(|symbol_meta| {
+        let data_path = data_path.clone();
+        let derived_stock_data_path = derived_stock_data_path.clone();
+        let symbol = symbol_meta.symbol.clone();
+        async move {
+            let result = tokio::task::spawn_blocking(move || {
+                populate_derived_stock(&data_path, &derived_stock_data_path, symbol_meta)
+            })
+            .await
+            .with_context(|| format!("{symbol} - derived stock worker failed"))
+            .and_then(|result| result);
+            (symbol, result)
+        }
+    }))
+    .buffer_unordered(parallelism.max(1));
 
-        //     if (!options.bypassFailures) {
-        //         console.log('\n')
-        //         return
-        //     }
-        // }
-        // finally {
-        //     const elapsedTime = Date.now() - startTime
-        //     console.log(`Stock ${i + 1} of ${symbols.length} (${Number(100 * ((i + 1) / symbols.length)).toFixed(2)}%) (${Number(elapsedTime/1000).toFixed(3)}s)`)
-        //     console.log()
-        //     i++
-        // }
+    while let Some((symbol, result)) = jobs.next().await {
+        completed += 1;
+        match result {
+            Ok(()) => populated += 1,
+            Err(cause) if bypass_failures => failures.push(PopulateFailure { symbol, cause }),
+            Err(cause) => return Err(cause.context(format!("{symbol} - failed to populate"))),
+        }
+
+        log::info!(
+            "Derived stocks - {} of {} ({:.2}%) ({:.3}s)",
+            completed,
+            total,
+            if total == 0 {
+                100.0
+            } else {
+                100.0 * completed as f64 / total as f64
+            },
+            started_at.elapsed().as_secs_f64(),
+        );
     }
+
+    Ok(PopulateReport {
+        populated,
+        failures,
+    })
 }
 
 // async function populateSymbolToStockMeta() {
@@ -616,32 +867,41 @@ async fn populate_symbols(symbols: Vec<SymbolMeta>) {
 //     }
 // }
 
-async fn populate_derived_stock(
-    symbol_meta: SymbolMeta, //     {
-                             //     symbolMeta,
-                             //     fromCurrencyToRate,
-                             // }: {
-                             //     symbolMeta: SymbolMeta
-                             //     fromCurrencyToRate: Record<Currency, number>
-                             // }
-) -> Stock {
-    let SymbolMeta { symbol, .. } = symbol_meta;
+fn populate_derived_stock(
+    data_path: &Path,
+    derived_stock_data_path: &Path,
+    symbol_meta: SymbolMeta,
+) -> Result<()> {
+    let SymbolMeta {
+        symbol,
+        cik,
+        name,
+        exchange,
+        is_easy_to_borrow,
+        is_shortable,
+        is_fractionable,
+    } = symbol_meta;
 
-    let prices = read_prices(&symbol);
-    // TODO: Dividends are not adjusted
-    let corporate_actions = read_corporate_actions(&symbol);
-    let sector = read_sector(&symbol);
+    let historical_prices = read_prices_from(data_path, &symbol)?;
+    let corporate_actions = read_corporate_actions_from(data_path, &symbol)?;
+    let sector = read_sector_from(data_path, &symbol)?;
+    let derived_stock = DerivedStock {
+        cik,
+        symbol: symbol.clone(),
+        name,
+        exchange,
+        is_easy_to_borrow,
+        is_shortable,
+        is_fractionable,
+        sector: DerivedSector::from(sector),
+        corporate_actions,
+        historical_prices,
+    };
 
-    // get_adjusted_dividends({
-    //     dividends: rawDividends,
-    //     splits,
-    //     fromCurrencyToRate,
-    // })
-
-    Stock {
-        cik: None,
-        symbol: "TODO".into(),
-    }
+    write_pretty_json_atomic(
+        &derived_stock_data_path.join(format!("{symbol}.json")),
+        &derived_stock,
+    )
     // const [
     //     bdcMeta,
     //     cefMeta,
