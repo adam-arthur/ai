@@ -1,4 +1,4 @@
 [alias]
-update-meta = "run -p ingest -- --remove-existing --update-meta"
+update-meta = "run -p ingest -- --update-meta"
 update-stocks = "run -p ingest -- --update-stocks"
 update-all = "run -p ingest -- --remove-existing --update-meta --update-stocks"
