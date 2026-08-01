@@ -17,5 +17,6 @@ mod openai;
 pub use client::{AskRequest, ClientError, ask};
 pub use model::{
     ImageInput, Model, ModelError, ModelId, ModelMessage, ModelRequest, ModelResponse,
-    ModelResponseFormat, ModelRole, ModelUsage, ParseModelIdError,
+    ModelResponseSchema, ModelRole, ModelUsage, ParseModelIdError,
 };
+pub use schemars::JsonSchema;

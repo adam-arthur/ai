@@ -1,5 +1,5 @@
+use schemars::{JsonSchema, Schema, schema_for};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use strum::{Display, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 use thiserror::Error;
 
@@ -87,14 +87,35 @@ pub struct ModelRequest {
     pub messages: Vec<ModelMessage>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
-    pub response_format: Option<ModelResponseFormat>,
+    pub response_schema: Option<ModelResponseSchema>,
 }
 
-/// A constraint on the model's generated response.
+/// A JSON Schema constraint derived from a Rust response type.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum ModelResponseFormat {
-    JsonObject,
-    JsonSchema { name: String, schema: Value },
+pub struct ModelResponseSchema {
+    name: String,
+    schema: Schema,
+}
+
+impl ModelResponseSchema {
+    pub fn for_type<T: JsonSchema>() -> Self {
+        Self {
+            name: T::schema_name().into_owned(),
+            schema: schema_for!(T),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    pub(crate) fn into_parts(self) -> (String, Schema) {
+        (self.name, self.schema)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::{
-    ModelRequest, ModelResponse, ModelResponseFormat, ModelRole, ModelUsage,
+    ModelRequest, ModelResponse, ModelRole, ModelUsage,
     openai::{
         ChatContent, ChatContentPart, ChatMessage, ChatRequest, ImageUrl, JsonSchemaFormat,
         OpenAiClient, ResponseFormat, Role,
@@ -73,15 +73,15 @@ impl LlamaClient {
         )
         .maybe_temperature(request.temperature)
         .maybe_max_tokens(request.max_tokens)
-        .maybe_response_format(request.response_format.map(|format| match format {
-            ModelResponseFormat::JsonObject => ResponseFormat::JsonObject,
-            ModelResponseFormat::JsonSchema { name, schema } => ResponseFormat::JsonSchema {
+        .maybe_response_format(request.response_schema.map(|response_schema| {
+            let (name, schema) = response_schema.into_parts();
+            ResponseFormat::JsonSchema {
                 json_schema: JsonSchemaFormat {
                     name,
                     strict: true,
-                    schema,
+                    schema: schema.into(),
                 },
-            },
+            }
         }))
         .build();
 

@@ -1,15 +1,21 @@
 use std::{error::Error, fmt, sync::OnceLock};
 
+use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
+
 use crate::{
     ImageInput, Model, ModelError, ModelId, ModelMessage, ModelRequest, ModelResponse,
-    ModelResponseFormat, async_trait, llama::LlamaClient, model::Backend,
+    ModelResponseSchema, async_trait, llama::LlamaClient, model::Backend,
 };
 
 static DEFAULT_CLIENT: OnceLock<Client> = OnceLock::new();
 
 /// Asks a model a single user question using backends configured from the
 /// process environment.
-pub async fn ask(request: AskRequest) -> Result<String, ClientError> {
+pub async fn ask<T>(request: AskRequest) -> Result<T, ClientError>
+where
+    T: JsonSchema + DeserializeOwned,
+{
     default_client()?.ask(request).await
 }
 
@@ -20,18 +26,17 @@ pub struct AskRequest {
     #[builder(into)]
     prompt: String,
     image: Option<ImageInput>,
-    response_format: Option<ModelResponseFormat>,
 }
 
 impl AskRequest {
-    fn into_model_request(self) -> ModelRequest {
+    fn into_model_request<T: JsonSchema>(self) -> ModelRequest {
         let message = match self.image {
             Some(image) => ModelMessage::user_with_image(self.prompt, image),
             None => ModelMessage::user(self.prompt),
         };
 
         ModelRequest::builder(self.model, [message])
-            .maybe_response_format(self.response_format)
+            .response_schema(ModelResponseSchema::for_type::<T>())
             .build()
     }
 }
@@ -60,9 +65,14 @@ impl Client {
     }
 
     /// Sends a single user prompt to the selected model backend.
-    async fn ask(&self, request: AskRequest) -> Result<String, ClientError> {
-        let response = self.complete_request(request.into_model_request()).await?;
-        Ok(response.content)
+    async fn ask<T>(&self, request: AskRequest) -> Result<T, ClientError>
+    where
+        T: JsonSchema + DeserializeOwned,
+    {
+        let response = self
+            .complete_request(request.into_model_request::<T>())
+            .await?;
+        serde_json::from_str(&response.content).map_err(ClientError::new)
     }
 
     async fn complete_request(&self, request: ModelRequest) -> Result<ModelResponse, ClientError> {
@@ -114,6 +124,12 @@ impl Error for ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+
+    #[derive(Deserialize, JsonSchema)]
+    struct TestResponse {
+        description: String,
+    }
 
     #[test]
     fn ask_request_builds_a_multimodal_model_request() {
@@ -121,9 +137,8 @@ mod tests {
             .model(ModelId::GEMMA_4_E2B_Q4)
             .prompt("Describe this image")
             .image(ImageInput::new("image/png", [1, 2, 3]))
-            .response_format(ModelResponseFormat::JsonObject)
             .build()
-            .into_model_request();
+            .into_model_request::<TestResponse>();
 
         assert_eq!(request.model, ModelId::GEMMA_4_E2B_Q4);
         assert_eq!(request.messages.len(), 1);
@@ -132,9 +147,13 @@ mod tests {
             request.messages[0].image,
             Some(ImageInput::new("image/png", [1, 2, 3]))
         );
-        assert_eq!(
-            request.response_format,
-            Some(ModelResponseFormat::JsonObject)
-        );
+        let response_schema = request.response_schema.unwrap();
+        assert_eq!(response_schema.name(), "TestResponse");
+        assert_eq!(response_schema.schema().as_value()["type"], "object");
+        assert!(response_schema.schema().as_value()["properties"]["description"].is_object());
+
+        let decoded: TestResponse =
+            serde_json::from_str(r#"{"description":"A test image"}"#).unwrap();
+        assert_eq!(decoded.description, "A test image");
     }
 }
