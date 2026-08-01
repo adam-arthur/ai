@@ -1,23 +1,43 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, sync::OnceLock};
 
-use crate::{Model, ModelError, ModelId, ModelMessage, ModelRequest, ModelResponse, async_trait, llama::LlamaClient, model::Backend};
+use crate::{
+    Model, ModelError, ModelId, ModelMessage, ModelRequest, ModelResponse, async_trait,
+    llama::LlamaClient, model::Backend,
+};
+
+static DEFAULT_CLIENT: OnceLock<Client> = OnceLock::new();
+
+/// Asks a model a single user question using backends configured from the
+/// process environment.
+pub async fn ask(model: ModelId, prompt: impl Into<String>) -> Result<String, ClientError> {
+    default_client()?.ask(model, prompt).await
+}
+
+fn default_client() -> Result<&'static Client, ClientError> {
+    if let Some(client) = DEFAULT_CLIENT.get() {
+        return Ok(client);
+    }
+
+    let client = Client::from_env()?;
+    Ok(DEFAULT_CLIENT.get_or_init(|| client))
+}
 
 /// Provider-neutral client that routes each model to its backend.
 #[derive(Clone, Debug)]
-pub struct Client {
+pub(crate) struct Client {
     llama: LlamaClient,
 }
 
 impl Client {
     /// Configures all model backends from the process environment.
-    pub fn from_env() -> Result<Self, ClientError> {
+    fn from_env() -> Result<Self, ClientError> {
         Ok(Self {
             llama: LlamaClient::from_env().map_err(ClientError::new)?,
         })
     }
 
     /// Sends a single user prompt to the backend selected by `model`.
-    pub async fn query(&self, model: ModelId, prompt: impl Into<String>) -> Result<String, ClientError> {
+    async fn ask(&self, model: ModelId, prompt: impl Into<String>) -> Result<String, ClientError> {
         let response = self
             .complete_request(ModelRequest::builder(model, [ModelMessage::user(prompt)]).build())
             .await?;
@@ -64,6 +84,8 @@ impl fmt::Display for ClientError {
 
 impl Error for ClientError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        self.source.as_deref().map(|source| source as &(dyn Error + 'static))
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn Error + 'static))
     }
 }

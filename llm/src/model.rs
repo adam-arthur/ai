@@ -15,7 +15,18 @@ pub(crate) enum Backend {
 /// The backend and backend-specific wire name are selected internally.
 #[allow(non_camel_case_types)]
 #[derive(
-    Clone, Copy, Debug, Display, EnumIter, EnumString, Hash, IntoStaticStr, PartialEq, Eq, Serialize, Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    Display,
+    EnumIter,
+    EnumString,
+    Hash,
+    IntoStaticStr,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
 )]
 #[strum(parse_err_ty = ParseModelIdError, parse_err_fn = ParseModelIdError::new)]
 pub enum ModelId {
@@ -167,7 +178,10 @@ mod tests {
         for (model, wire_name) in ModelId::iter().zip(wire_names) {
             assert_eq!(model.as_str(), wire_name);
             assert_eq!(model.as_str().parse(), Ok(model));
-            assert_eq!(serde_json::to_string(&model).unwrap(), format!(r#""{model}""#));
+            assert_eq!(
+                serde_json::to_string(&model).unwrap(),
+                format!(r#""{model}""#)
+            );
         }
 
         assert_eq!(

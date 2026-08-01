@@ -1,4 +1,7 @@
-use crate::{ModelRequest, ModelResponse, ModelResponseFormat, ModelRole, ModelUsage, openai::{ChatMessage, ChatRequest, JsonSchemaFormat, OpenAiClient, ResponseFormat, Role}};
+use crate::{
+    ModelRequest, ModelResponse, ModelResponseFormat, ModelRole, ModelUsage,
+    openai::{ChatMessage, ChatRequest, JsonSchemaFormat, OpenAiClient, ResponseFormat, Role},
+};
 
 use super::{LlamaClientError, LlamaConfig};
 

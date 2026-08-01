@@ -25,7 +25,9 @@ impl LlamaConfig {
         &self.server
     }
 
-    fn from_lookup(mut lookup: impl FnMut(&str) -> Result<String, env::VarError>) -> Result<Self, LlamaConfigError> {
+    fn from_lookup(
+        mut lookup: impl FnMut(&str) -> Result<String, env::VarError>,
+    ) -> Result<Self, LlamaConfigError> {
         let server = lookup(SERVER_ENV).map_err(|source| LlamaConfigError::Environment {
             name: SERVER_ENV,
             source,

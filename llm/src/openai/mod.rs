@@ -4,4 +4,6 @@ mod client;
 mod protocol;
 
 pub(crate) use client::{OpenAiClient, OpenAiClientError};
-pub(crate) use protocol::{ChatCompletion, ChatMessage, ChatRequest, JsonSchemaFormat, ResponseFormat, Role};
+pub(crate) use protocol::{
+    ChatCompletion, ChatMessage, ChatRequest, JsonSchemaFormat, ResponseFormat, Role,
+};
