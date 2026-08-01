@@ -1,10 +1,12 @@
 use futures::{StreamExt, stream};
 use time::OffsetDateTime;
 
+use crate::financials::local_api::read_sector_from;
 use crate::financials::models::SymbolMeta;
 use crate::ingest_utils::{
-    common::INGEST_SETTINGS, ensure_company, ensure_corporate_actions, ensure_data_folders, ensure_exchange_rates, ensure_prices, ensure_sectors, ensure_tradable_symbols, ensure_treasury_rates, is_valid_symbol
+    common::INGEST_SETTINGS, ensure_company, ensure_corporate_actions, ensure_data_folders, ensure_exchange_rates, ensure_ffo, ensure_prices, ensure_sectors, ensure_tradable_symbols, ensure_treasury_rates, is_valid_symbol
 };
+use crate::meta_utils::get_app_data_path;
 
 pub async fn ingest() {
     log::debug!("Settings {:?}", INGEST_SETTINGS);
@@ -36,29 +38,41 @@ pub async fn ingest() {
         populate_timeseries(&tradable_symbols),
     );
 
-    // const [sectors] = await Promise.all([
-    //     populatePortfolioMeta(tradableItems),
-    // ])
+    populate_ffo(&tradable_symbols).await;
+}
 
-    // TODO: Optimize this path
-    // const symbolToSector = Object.fromEntries(sectors.map(v => [v.meta.symbol, v.value]))
+fn is_equity_reit_gics(sub_industry_gics: Option<u64>) -> bool {
+    sub_industry_gics.is_some_and(|gics| gics / 10_000 == 6010)
+}
 
-    // FFO Only applies to equity reits
-    // const equityReitSymbols = tradableSymbols.filter(s => {
-    //     const sector = symbolToSector[s]
-    //     const isEquityReit = sector && sector.industryName === 'Equity Real Estate Investment Trusts (REITs)'
-    //     return isEquityReit
-    // })
-    // const chunkedEquityReitSymbols = chunk(equityReitSymbols, 5)
-    // for (const symbolChunk of chunkedEquityReitSymbols) {
-    //     const { wasCached } = await ensureFfoHistory({
-    //         symbols: symbolChunk
-    //     })
+async fn populate_ffo(tradable_symbols: &[SymbolMeta]) {
+    log::info!("FFO - identifying equity REITs...");
+    let data_path = get_app_data_path();
 
-    //     if (!wasCached) {
-    //         await sleep(30_000)
-    //     }
-    // }
+    for symbol_meta in tradable_symbols {
+        let symbol = &symbol_meta.symbol;
+        let sector = match read_sector_from(data_path, symbol) {
+            Ok(sector) => sector,
+            Err(error) => {
+                log::warn!(
+                    "{} - FFO - sector data unavailable, skipping: {error:#}",
+                    symbol
+                );
+                continue;
+            }
+        };
+        if !is_equity_reit_gics(sector.sub_industry_gics) {
+            continue;
+        }
+
+        let Some(cik) = symbol_meta.cik.as_deref() else {
+            log::warn!("{} - FFO - no CIK, skipping...", symbol);
+            continue;
+        };
+        if let Err(error) = ensure_ffo(symbol, cik).await {
+            log::error!("{} - FFO - ingest failed: {error:#}", symbol);
+        }
+    }
 }
 
 async fn populate_sectors(tradable_symbols: &[String]) {
@@ -115,4 +129,23 @@ async fn populate_timeseries(tradable_symbols: &[SymbolMeta]) {
             );
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_equity_reit_gics;
+
+    #[test]
+    fn recognizes_all_equity_reit_industries() {
+        assert!(is_equity_reit_gics(Some(60_101_010)));
+        assert!(is_equity_reit_gics(Some(60_103_010)));
+        assert!(is_equity_reit_gics(Some(60_108_050)));
+    }
+
+    #[test]
+    fn excludes_mortgage_reits_and_other_real_estate_companies() {
+        assert!(!is_equity_reit_gics(Some(40_204_010)));
+        assert!(!is_equity_reit_gics(Some(60_201_010)));
+        assert!(!is_equity_reit_gics(None));
+    }
 }

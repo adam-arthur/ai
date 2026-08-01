@@ -19,10 +19,9 @@ pub(super) struct FilingIndexDocument {
 
 pub(super) async fn discover_reit_ffo_sources(
     cik: &str,
-    sources_dir: Option<&Path>,
+    issuer_dir: Option<&Path>,
 ) -> Result<ReitFfoSources> {
     let normalized_cik = cik.trim_start_matches('0');
-    let issuer_dir = sources_dir.map(|directory| directory.join(normalized_cik));
     let mut filings = fetch_recent_filings(cik).await?;
     filings.sort_by(|left, right| {
         filing_priority(left)
@@ -34,7 +33,7 @@ pub(super) async fn discover_reit_ffo_sources(
     let mut documents = Vec::new();
     let mut seen_urls = HashSet::new();
     for filing in filings {
-        let filing_documents = fetch_filing_index(&filing, issuer_dir.as_deref()).await?;
+        let filing_documents = fetch_filing_index(&filing, issuer_dir).await?;
         for document in filing_documents
             .into_iter()
             .filter(|document| is_likely_ffo_source(&filing, document))

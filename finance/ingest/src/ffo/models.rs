@@ -1,7 +1,7 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A filing document likely to contain a reported FFO or AFFO value or reconciliation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FfoSourceDocument {
     pub url: String,
@@ -14,7 +14,7 @@ pub struct FfoSourceDocument {
 }
 
 /// Source-document discovery results for one issuer.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReitFfoSources {
     pub cik: String,
@@ -23,7 +23,7 @@ pub struct ReitFfoSources {
 
 /// A source location that makes an extracted value traceable to both the immutable SEC URL and
 /// the archived local copy.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FfoValueSource {
     pub document_url: String,
@@ -37,7 +37,7 @@ pub struct FfoValueSource {
 }
 
 /// One row in the issuer's reconciliation, retained verbatim after whitespace normalization.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FfoReconciliationRow {
     pub label: String,
@@ -45,7 +45,7 @@ pub struct FfoReconciliationRow {
 }
 
 /// A reported FFO/AFFO total or per-share amount.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportedFfoValue {
     /// Broad measure family (`ffo` or `affo`). See `companyLabel` for qualified variants such as
@@ -71,7 +71,7 @@ pub struct ReportedFfoValue {
 }
 
 /// Archive and extraction result for one downloaded source document.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractedFfoDocument {
     #[serde(flatten)]
@@ -87,7 +87,7 @@ pub struct ExtractedFfoDocument {
 }
 
 /// Complete persisted result for an issuer.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReitFfoExtraction {
     pub cik: String,

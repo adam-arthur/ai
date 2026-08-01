@@ -4,7 +4,9 @@
 //! non-GAAP measures whose definitions vary, so downstream code must not silently combine values
 //! that have different labels or reconciliation methodologies.
 
-use std::{fs, path::Path};
+use std::{
+    fs, path::{Path, PathBuf}
+};
 
 use anyhow::{Context, Result};
 use reqwest::Url;
@@ -17,9 +19,7 @@ pub use models::{
     ExtractedFfoDocument, FfoReconciliationRow, FfoSourceDocument, FfoValueSource, ReitFfoExtraction, ReitFfoSources, ReportedFfoValue
 };
 
-use crate::{
-    common::sec_api::fetch_sec_document, file_utils::write_json_atomic, meta_utils::get_app_data_path
-};
+use crate::{common::sec_api::fetch_sec_document, meta_utils::get_app_data_path};
 
 /// Locates likely FFO/AFFO source documents without writing to the persistent source cache.
 #[allow(dead_code)]
@@ -41,16 +41,17 @@ pub async fn fetch_reit_ffo_sources_batch(
 
 /// Discovers, downloads, and extracts an issuer's recent FFO/AFFO source documents.
 ///
-/// Raw documents are archived below `sources_dir/<cik>/<accession>/<document-name>`. The returned
-/// result is also atomically written to `sources_dir/<cik>/extraction.json`. An existing non-empty
-/// document is read from disk and is never fetched again.
+/// Raw documents are archived below `sources_dir/<symbol>/<accession>/<document-name>`. An
+/// existing non-empty document is read from disk and is never fetched again. The CIK is used only
+/// to query SEC data and retained in the returned extraction for provenance.
 #[allow(dead_code)]
 pub async fn fetch_reit_ffo_data(
+    symbol: &str,
     cik: &str,
     sources_dir: impl AsRef<Path>,
 ) -> Result<ReitFfoExtraction> {
-    let sources = discovery::discover_reit_ffo_sources(cik, Some(sources_dir.as_ref())).await?;
-    let issuer_dir = sources_dir.as_ref().join(&sources.cik);
+    let issuer_dir = issuer_source_dir(sources_dir.as_ref(), symbol);
+    let sources = discovery::discover_reit_ffo_sources(cik, Some(&issuer_dir)).await?;
     fs::create_dir_all(&issuer_dir)
         .with_context(|| format!("failed to create {}", issuer_dir.display()))?;
 
@@ -73,30 +74,32 @@ pub async fn fetch_reit_ffo_data(
         ));
     }
 
-    let extraction = ReitFfoExtraction {
+    Ok(ReitFfoExtraction {
         cik: sources.cik,
         documents,
-    };
-    write_json_atomic(&issuer_dir.join("extraction.json"), &extraction)?;
-    Ok(extraction)
+    })
 }
 
 /// Uses the repository's persistent source cache (`data/ffo/sources` in the default setup).
 #[allow(dead_code)]
-pub async fn fetch_reit_ffo_data_to_cache(cik: &str) -> Result<ReitFfoExtraction> {
-    fetch_reit_ffo_data(cik, get_app_data_path().join("ffo").join("sources")).await
+pub async fn fetch_reit_ffo_data_to_cache(symbol: &str, cik: &str) -> Result<ReitFfoExtraction> {
+    fetch_reit_ffo_data(symbol, cik, get_app_data_path().join("ffo").join("sources")).await
 }
 
-/// Sequential batch variant that honors the SEC fair-access request rate and caller CIK order.
+/// Sequential batch variant that honors the SEC fair-access request rate and caller issuer order.
 #[allow(dead_code)]
 pub async fn fetch_reit_ffo_data_batch_to_cache(
-    ciks: impl IntoIterator<Item = impl AsRef<str>>,
+    issuers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
 ) -> Result<Vec<ReitFfoExtraction>> {
     let mut results = Vec::new();
-    for cik in ciks {
-        results.push(fetch_reit_ffo_data_to_cache(cik.as_ref()).await?);
+    for (symbol, cik) in issuers {
+        results.push(fetch_reit_ffo_data_to_cache(symbol.as_ref(), cik.as_ref()).await?);
     }
     Ok(results)
+}
+
+fn issuer_source_dir(sources_dir: &Path, symbol: &str) -> PathBuf {
+    sources_dir.join(symbol)
 }
 
 async fn load_or_fetch_source_document(
@@ -369,6 +372,14 @@ mod tests {
                 "https://www.sec.gov/Archives/edgar/data/123/1/earnings-release.htm?source=ix"
             ),
             "earnings-release.htm"
+        );
+    }
+
+    #[test]
+    fn symbol_keys_the_sec_source_directory() {
+        assert_eq!(
+            issuer_source_dir(Path::new("data/ffo/sources"), "VICI"),
+            Path::new("data/ffo/sources/VICI")
         );
     }
 
