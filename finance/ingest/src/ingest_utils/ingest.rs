@@ -9,6 +9,8 @@ use crate::ingest_utils::{
 };
 use crate::meta_utils::get_app_data_path;
 
+const POPULATE_FFO: bool = false;
+
 pub async fn ingest() {
     log::debug!("Settings {:?}", INGEST_SETTINGS);
 
@@ -39,7 +41,9 @@ pub async fn ingest() {
         populate_timeseries(&tradable_symbols),
     );
 
-    populate_ffo(&tradable_symbols).await;
+    if POPULATE_FFO {
+        populate_ffo(&tradable_symbols).await;
+    }
 }
 
 fn is_equity_reit_gics(sub_industry_gics: Option<u64>) -> bool {
