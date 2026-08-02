@@ -3,9 +3,9 @@ use ego_tree::{NodeId, NodeRef};
 use scraper::{ElementRef, Html, Node, Selector, node::Text};
 
 const ALLOWED_ELEMENTS: &[&str] = &[
-    "a", "b", "br", "caption", "col", "colgroup", "div", "em", "font", "i", "p", "s", "small",
-    "img", "span", "strong", "sub", "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr",
-    "u",
+    "a", "b", "br", "caption", "col", "colgroup", "div", "em", "font", "h1", "h2", "h3", "h4",
+    "h5", "h6", "i", "p", "s", "small", "img", "span", "strong", "sub", "sup", "table", "tbody",
+    "td", "tfoot", "th", "thead", "tr", "u",
 ];
 
 const PRESENTATIONAL_ATTRIBUTES: &[&str] = &[
@@ -315,7 +315,10 @@ fn append_visible_text(node: ElementRef<'_>, output: &mut String, pending_space:
                 *pending_space = !output.is_empty();
             }
             Node::Element(element) => {
-                let block = matches!(element.name(), "div" | "p");
+                let block = matches!(
+                    element.name(),
+                    "div" | "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                );
                 if block {
                     *pending_space = !output.is_empty();
                 }
@@ -1413,6 +1416,21 @@ mod tests {
         assert_eq!(
             render_table_text(input).unwrap(),
             "·  FFO was $11.6 million.\n"
+        );
+    }
+
+    #[test]
+    fn renders_heading_markup_inside_cells() {
+        let input = concat!(
+            "<table><tr>",
+            "<td><h2><font>Funds From Operations (FFO)</font></h2></td>",
+            "<td><h2>2025</h2><h2>Actual</h2></td>",
+            "</tr></table>"
+        );
+
+        assert_eq!(
+            render_table_text(input).unwrap(),
+            "Funds From Operations (FFO)  2025 Actual\n"
         );
     }
 

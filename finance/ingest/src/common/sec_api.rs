@@ -40,7 +40,7 @@ struct SecCompanySubmission {
     #[serde(default)]
     tickers: Vec<String>,
     #[serde(default)]
-    exchanges: Vec<String>,
+    exchanges: Vec<Option<String>>,
     sic: Option<String>,
     sic_description: Option<String>,
     description: Option<String>,
@@ -401,6 +401,7 @@ impl SecCompanySubmission {
             .position(|ticker| ticker.eq_ignore_ascii_case(symbol))
             .and_then(|index| self.exchanges.get(index))
             .cloned()
+            .flatten()
             .and_then(non_empty);
         let address = self.addresses.and_then(|addresses| addresses.business);
 
@@ -626,6 +627,21 @@ mod tests {
                 "fiscalYearEnd": "0927"
             })
         );
+    }
+
+    #[test]
+    fn sec_submission_accepts_a_null_exchange_for_a_ticker() {
+        let submission = serde_json::from_value::<SecCompanySubmission>(json!({
+            "name": "Viking Acquisition Corp. II",
+            "tickers": ["VII", "VII-UN"],
+            "exchanges": [null, "NYSE"]
+        }))
+        .unwrap();
+
+        let company = submission.into_company("VII");
+
+        assert_eq!(company.company_name, "Viking Acquisition Corp. II");
+        assert_eq!(company.exchange, None);
     }
 
     #[test]
