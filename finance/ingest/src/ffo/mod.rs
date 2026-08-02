@@ -5,7 +5,7 @@
 //! the consumer-facing model.
 
 use std::{
-    fs, path::{Path, PathBuf}
+    collections::{BTreeSet, HashSet}, fs, path::{Path, PathBuf}
 };
 
 use anyhow::{Context, Result};
@@ -22,12 +22,15 @@ pub use models::{
     FfoAdjustment, FfoMeasure, FfoMeasures, FfoPeriodResult, FfoReconciliation, FfoReportingPeriod, FfoSourceDocument, ReitFfoData, ReitFfoSources
 };
 
+use crate::file_utils::write_json_atomic;
 use crate::{common::sec_api::fetch_sec_document, meta_utils::get_app_data_path};
+
+const PROCESSED_FILINGS_FILE: &str = "processed-filings.json";
 
 /// Locates likely FFO/AFFO source documents without writing to the persistent source cache.
 #[allow(dead_code)]
 pub async fn fetch_reit_ffo_sources(cik: &str) -> Result<ReitFfoSources> {
-    discovery::discover_reit_ffo_sources(cik, None).await
+    discovery::discover_reit_ffo_sources(cik).await
 }
 
 /// Runs uncached source discovery sequentially while preserving caller CIK order.
@@ -44,9 +47,9 @@ pub async fn fetch_reit_ffo_sources_batch(
 
 /// Discovers, downloads, and extracts an issuer's recent FFO/AFFO source documents.
 ///
-/// Raw documents are archived below `sources_dir/<symbol>/<accession>/<document-name>`. An
-/// existing non-empty document is read from disk and is never fetched again. The CIK is used only
-/// to query SEC data and retained in the returned extraction for provenance.
+/// Raw documents are archived below semantic filing directories such as
+/// `sources_dir/<symbol>/2025-q4-results/<document-name>`. Processed SEC accessions, including
+/// filings determined not to contain FFO material, are recorded in `processed-filings.json`.
 #[allow(dead_code)]
 pub async fn fetch_reit_ffo_data(
     symbol: &str,
@@ -54,41 +57,84 @@ pub async fn fetch_reit_ffo_data(
     sources_dir: impl AsRef<Path>,
 ) -> Result<ReitFfoData> {
     let issuer_dir = issuer_source_dir(sources_dir.as_ref(), symbol);
-    let sources = discovery::discover_reit_ffo_sources(cik, Some(&issuer_dir)).await?;
     fs::create_dir_all(&issuer_dir)
         .with_context(|| format!("failed to create {}", issuer_dir.display()))?;
+    let processed_path = issuer_dir.join(PROCESSED_FILINGS_FILE);
+    let mut processed_accessions = read_processed_accessions(&processed_path)?;
+    let filings = discovery::discover_reit_ffo_filings(cik, &processed_accessions).await?;
 
-    let mut documents = Vec::with_capacity(sources.documents.len());
-    for source in sources.documents {
-        let accession = sanitize_path_component(&source.accession_number);
-        let document_dir = issuer_dir.join(accession);
-        fs::create_dir_all(&document_dir)
-            .with_context(|| format!("failed to create {}", document_dir.display()))?;
-        let file_name = source_file_name(&source.url);
-        let local_path = document_dir.join(file_name);
-        let (bytes, content_type) = load_or_fetch_source_document(&source.url, &local_path).await?;
-
-        match vision::ensure_candidate_images(&local_path, content_type.as_deref(), &bytes).await {
-            Ok(count) => log::debug!(
-                "FFO vision - cached {count} candidate image(s) for {}",
-                local_path.display()
-            ),
-            Err(error) => log::warn!(
-                "FFO vision - failed for {}: {error:#}",
-                local_path.display()
-            ),
+    let mut documents = Vec::new();
+    for filing in filings {
+        let accession = filing.filing.accession_number.clone();
+        let mut fetched_documents = Vec::new();
+        for source in filing.documents {
+            let (bytes, content_type) = fetch_sec_document(&source.url)
+                .await
+                .with_context(|| format!("failed to download {}", source.url))?;
+            if bytes.is_empty() {
+                anyhow::bail!("SEC returned an empty source document for {}", source.url);
+            }
+            if document_mentions_ffo(&source, &bytes, content_type.as_deref()) {
+                fetched_documents.push((source, bytes, content_type));
+            }
         }
 
-        // HTML value extraction is intentionally paused while the screenshot-first pipeline is
-        // developed. Keep the source document in the canonicalization input so SEC pulling and
-        // image generation continue unchanged, but do not publish HTML-scraped values.
-        documents.push(ExtractedFfoDocument {
-            document: source,
-            values: Vec::new(),
-        });
+        if fetched_documents.is_empty() {
+            mark_accession_processed(&processed_path, &mut processed_accessions, accession)?;
+            continue;
+        }
+
+        let folder_name = semantic_filing_name(&filing.filing, &fetched_documents);
+        let document_dir = issuer_dir.join(&folder_name);
+        assert!(
+            !document_dir.exists(),
+            "FFO source folder collision: {} already exists while processing {}",
+            document_dir.display(),
+            accession
+        );
+        assert_unique_source_file_names(&accession, &fetched_documents);
+        fs::create_dir(&document_dir)
+            .with_context(|| format!("failed to create {}", document_dir.display()))?;
+
+        for (source, bytes, content_type) in fetched_documents {
+            let local_path = document_dir.join(source_file_name(&source.url));
+            assert!(
+                !local_path.exists(),
+                "FFO source filename collision at {} while processing {}",
+                local_path.display(),
+                accession
+            );
+            write_bytes_atomic(&local_path, &bytes)?;
+
+            match vision::ensure_candidate_images(&local_path, content_type.as_deref(), &bytes)
+                .await
+            {
+                Ok(count) => log::debug!(
+                    "FFO vision - cached {count} candidate image(s) for {}",
+                    local_path.display()
+                ),
+                Err(error) => log::warn!(
+                    "FFO vision - failed for {}: {error:#}",
+                    local_path.display()
+                ),
+            }
+
+            // HTML value extraction is intentionally paused while the screenshot-first pipeline is
+            // developed. Keep the source document in the canonicalization input so SEC pulling and
+            // image generation continue unchanged, but do not publish HTML-scraped values.
+            documents.push(ExtractedFfoDocument {
+                document: source,
+                values: Vec::new(),
+            });
+        }
+        mark_accession_processed(&processed_path, &mut processed_accessions, accession)?;
     }
 
-    Ok(canonical::canonicalize(symbol, &sources.cik, documents))
+    Ok(canonical::canonicalize(
+        symbol,
+        cik.trim_start_matches('0'),
+        documents,
+    ))
 }
 
 /// Uses the repository's persistent source cache (`data/ffo/sources` in the default setup).
@@ -113,51 +159,155 @@ fn issuer_source_dir(sources_dir: &Path, symbol: &str) -> PathBuf {
     sources_dir.join(symbol)
 }
 
-async fn load_or_fetch_source_document(
-    url: &str,
-    local_path: &Path,
-) -> Result<(Vec<u8>, Option<String>)> {
-    if let Some(bytes) = read_non_empty_file(local_path)? {
-        log::debug!(
-            "FFO source - using cached document {}",
-            local_path.display()
-        );
-        let content_type = infer_content_type(local_path, &bytes);
-        return Ok((bytes, content_type));
-    }
-
-    let (bytes, content_type) = fetch_sec_document(url)
-        .await
-        .with_context(|| format!("failed to download {url}"))?;
-    if bytes.is_empty() {
-        anyhow::bail!("SEC returned an empty source document for {url}");
-    }
-    write_bytes_atomic(local_path, &bytes)?;
-    Ok((bytes, content_type))
-}
-
-pub(super) fn read_non_empty_file(path: &Path) -> Result<Option<Vec<u8>>> {
+fn read_processed_accessions(path: &Path) -> Result<BTreeSet<String>> {
     if !path.is_file() {
-        return Ok(None);
+        return Ok(BTreeSet::new());
     }
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok((!bytes.is_empty()).then_some(bytes))
+    serde_json::from_slice(&bytes).with_context(|| format!("failed to parse {}", path.display()))
 }
 
-fn infer_content_type(path: &Path, bytes: &[u8]) -> Option<String> {
-    if bytes.starts_with(b"%PDF-")
-        || path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
-    {
-        Some("application/pdf".to_owned())
-    } else if path.extension().is_some_and(|extension| {
-        extension.eq_ignore_ascii_case("htm") || extension.eq_ignore_ascii_case("html")
-    }) {
-        Some("text/html".to_owned())
-    } else {
-        None
+fn mark_accession_processed(
+    path: &Path,
+    processed_accessions: &mut BTreeSet<String>,
+    accession: String,
+) -> Result<()> {
+    processed_accessions.insert(accession);
+    write_json_atomic(path, processed_accessions)
+}
+
+fn document_mentions_ffo(
+    source: &FfoSourceDocument,
+    bytes: &[u8],
+    content_type: Option<&str>,
+) -> bool {
+    let is_pdf = bytes.starts_with(b"%PDF-")
+        || content_type.is_some_and(|value| value.to_ascii_lowercase().contains("pdf"));
+    if is_pdf {
+        let metadata = format!("{} {}", source.description, source.url).to_ascii_lowercase();
+        return [
+            "earnings",
+            "financial results",
+            "supplement",
+            "funds from operations",
+            "ffo",
+            "affo",
+        ]
+        .iter()
+        .any(|keyword| metadata.contains(keyword));
     }
+    extract::contains_ffo_metric(&String::from_utf8_lossy(bytes))
+}
+
+fn assert_unique_source_file_names(
+    accession: &str,
+    documents: &[(FfoSourceDocument, Vec<u8>, Option<String>)],
+) {
+    let mut names = HashSet::new();
+    let mut vision_keys = HashSet::new();
+    for (source, _, _) in documents {
+        let name = source_file_name(&source.url);
+        assert!(
+            names.insert(name.to_ascii_lowercase()),
+            "FFO source filename collision for {name} in filing {accession}"
+        );
+        let vision_key = Path::new(&name)
+            .file_stem()
+            .expect("FFO source filename has no stem")
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        assert!(
+            vision_keys.insert(vision_key.clone()),
+            "FFO vision output collision for {vision_key} in filing {accession}"
+        );
+    }
+}
+
+fn semantic_filing_name(
+    filing: &crate::common::sec_api::SecFiling,
+    documents: &[(FfoSourceDocument, Vec<u8>, Option<String>)],
+) -> String {
+    let form = filing.form.strip_suffix("/A").unwrap_or(&filing.form);
+    let period = documents
+        .iter()
+        .find_map(|(source, _, _)| period_from_document_name(&source.url))
+        .or_else(|| {
+            matches!(form, "10-Q" | "10-K")
+                .then(|| filing.report_date.as_deref().and_then(calendar_quarter))
+                .flatten()
+        })
+        .unwrap_or_else(|| filing.filing_date.clone());
+    let document_metadata = documents
+        .iter()
+        .map(|(source, _, _)| format!("{} {}", source.description, source.url))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let kind = match form {
+        "10-Q" => "10-q",
+        "10-K" => "10-k",
+        _ if document_metadata.contains("supplement")
+            && !document_metadata.contains("earnings")
+            && !document_metadata.contains("financial results") =>
+        {
+            "supplemental"
+        }
+        _ => "results",
+    };
+    let amended = filing.form.ends_with("/A")
+        || document_metadata.contains("amend")
+        || (kind == "supplemental"
+            && documents.iter().any(|(_, bytes, _)| {
+                String::from_utf8_lossy(bytes)
+                    .to_ascii_lowercase()
+                    .contains("amended and restated")
+            }));
+    format!("{period}-{kind}{}", if amended { "-amendment" } else { "" })
+}
+
+fn period_from_document_name(url: &str) -> Option<String> {
+    let name = source_file_name(url).to_ascii_lowercase();
+    let bytes = name.as_bytes();
+    for index in 0..bytes.len() {
+        if bytes[index] != b'q' {
+            continue;
+        }
+        if index >= 1
+            && index + 2 < bytes.len()
+            && matches!(bytes[index - 1], b'1'..=b'4')
+            && let Some(year) = parse_short_year(&bytes[index + 1..])
+        {
+            return Some(format!("{year}-q{}", bytes[index - 1] as char));
+        }
+        if index + 1 < bytes.len() && matches!(bytes[index + 1], b'1'..=b'4') {
+            let quarter = bytes[index + 1] as char;
+            if index >= 4 && bytes[index - 4..index].iter().all(u8::is_ascii_digit) {
+                let year = std::str::from_utf8(&bytes[index - 4..index]).ok()?;
+                return Some(format!("{year}-q{quarter}"));
+            }
+            if let Some(year) = parse_short_year(&bytes[index + 2..]) {
+                return Some(format!("{year}-q{quarter}"));
+            }
+        }
+    }
+    None
+}
+
+fn parse_short_year(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() >= 4 && bytes[..4].iter().all(u8::is_ascii_digit) {
+        return std::str::from_utf8(&bytes[..4]).ok()?.parse().ok();
+    }
+    if bytes.len() >= 2 && bytes[..2].iter().all(u8::is_ascii_digit) {
+        return Some(2000 + std::str::from_utf8(&bytes[..2]).ok()?.parse::<u16>().ok()?);
+    }
+    None
+}
+
+fn calendar_quarter(date: &str) -> Option<String> {
+    let year = date.get(..4)?;
+    let month = date.get(5..7)?.parse::<u8>().ok()?;
+    let quarter = (month.checked_sub(1)? / 3) + 1;
+    Some(format!("{year}-q{quarter}"))
 }
 
 pub(super) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -376,31 +526,195 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_ffo_documents_without_matching_unrelated_words() {
+        let source = FfoSourceDocument {
+            url: "https://www.sec.gov/results.htm".to_owned(),
+            exhibit_type: "EX-99.1".to_owned(),
+            description: "Results".to_owned(),
+            filing_date: "2026-02-03".to_owned(),
+            accession_number: "0000123-26-000001".to_owned(),
+            filing_form: "8-K".to_owned(),
+            filing_index_url: "https://www.sec.gov/index.html".to_owned(),
+        };
+        assert!(document_mentions_ffo(
+            &source,
+            b"<p>Funds From Operations attributable to shareholders</p>",
+            Some("text/html")
+        ));
+        assert!(document_mentions_ffo(
+            &source,
+            b"<td>Adjusted FFO</td>",
+            Some("text/html")
+        ));
+        assert!(!document_mentions_ffo(
+            &source,
+            b"<p>Affordable housing portfolio update</p>",
+            Some("text/html")
+        ));
+
+        let supplemental = FfoSourceDocument {
+            url: "https://www.sec.gov/q42025supplemental.pdf".to_owned(),
+            description: "Quarterly supplemental".to_owned(),
+            ..source
+        };
+        assert!(document_mentions_ffo(
+            &supplemental,
+            b"%PDF-compressed",
+            Some("application/pdf")
+        ));
+    }
+
+    #[test]
+    fn derives_semantic_reporting_periods_from_sec_document_names() {
+        assert_eq!(
+            period_from_document_name("https://www.sec.gov/a4q25earningsrelease.htm").as_deref(),
+            Some("2025-q4")
+        );
+        assert_eq!(
+            period_from_document_name("https://www.sec.gov/q12026-results.htm").as_deref(),
+            Some("2026-q1")
+        );
+        assert_eq!(
+            period_from_document_name("https://www.sec.gov/2026q2-results.htm").as_deref(),
+            Some("2026-q2")
+        );
+    }
+
+    #[test]
+    fn distinguishes_results_and_periodic_report_directories() {
+        let mut eight_k = filing("8-K", &["2.02"], "form8-k.htm");
+        eight_k.filing_date = "2026-02-03".to_owned();
+        eight_k.report_date = Some("2026-02-03".to_owned());
+        let source = FfoSourceDocument {
+            url: "https://www.sec.gov/a4q25earningsrelease.htm".to_owned(),
+            exhibit_type: "EX-99.1".to_owned(),
+            description: "Earnings release".to_owned(),
+            filing_date: eight_k.filing_date.clone(),
+            accession_number: eight_k.accession_number.clone(),
+            filing_form: eight_k.form.clone(),
+            filing_index_url: eight_k.filing_index_url.clone(),
+        };
+        let documents = vec![(source, Vec::new(), Some("text/html".to_owned()))];
+
+        assert_eq!(
+            semantic_filing_name(&eight_k, &documents),
+            "2025-q4-results"
+        );
+
+        let ten_k = filing("10-K", &[], "annual.htm");
+        assert_eq!(semantic_filing_name(&ten_k, &documents), "2025-q4-10-k");
+
+        let generic_source = FfoSourceDocument {
+            url: "https://www.sec.gov/collections-update.htm".to_owned(),
+            ..documents[0].0.clone()
+        };
+        assert_eq!(
+            semantic_filing_name(
+                &eight_k,
+                &[(generic_source, b"FFO collections update".to_vec(), None)]
+            ),
+            "2026-02-03-results"
+        );
+    }
+
+    #[test]
+    fn identifies_amended_supplemental_from_document_content() {
+        let eight_k = filing("8-K", &["2.02"], "form8-k.htm");
+        let source = FfoSourceDocument {
+            url: "https://www.sec.gov/a4q25supplemental.htm".to_owned(),
+            exhibit_type: "EX-99.1".to_owned(),
+            description: "Supplemental information".to_owned(),
+            filing_date: eight_k.filing_date.clone(),
+            accession_number: eight_k.accession_number.clone(),
+            filing_form: eight_k.form.clone(),
+            filing_index_url: eight_k.filing_index_url.clone(),
+        };
+        let documents = vec![(
+            source,
+            b"Fourth Quarter 2025 Amended and Restated Supplemental Information".to_vec(),
+            Some("text/html".to_owned()),
+        )];
+
+        assert_eq!(
+            semantic_filing_name(&eight_k, &documents),
+            "2025-q4-supplemental-amendment"
+        );
+    }
+
+    #[test]
+    fn processed_filings_serialize_as_a_plain_sorted_array() {
+        let processed = BTreeSet::from([
+            "0001500217-26-000029".to_owned(),
+            "0001500217-26-000004".to_owned(),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(processed).unwrap(),
+            serde_json::json!(["0001500217-26-000004", "0001500217-26-000029"])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "FFO source filename collision")]
+    fn panics_on_case_insensitive_source_filename_collisions() {
+        let make_source = |url: &str| FfoSourceDocument {
+            url: url.to_owned(),
+            exhibit_type: "EX-99.1".to_owned(),
+            description: "Earnings release".to_owned(),
+            filing_date: "2026-02-03".to_owned(),
+            accession_number: "0000123-26-000001".to_owned(),
+            filing_form: "8-K".to_owned(),
+            filing_index_url: "https://www.sec.gov/index.html".to_owned(),
+        };
+        let documents = vec![
+            (
+                make_source("https://www.sec.gov/Results.htm"),
+                Vec::new(),
+                None,
+            ),
+            (
+                make_source("https://www.sec.gov/results.htm"),
+                Vec::new(),
+                None,
+            ),
+        ];
+
+        assert_unique_source_file_names("0000123-26-000001", &documents);
+    }
+
+    #[test]
+    #[should_panic(expected = "FFO vision output collision")]
+    fn panics_when_source_extensions_would_share_a_vision_directory() {
+        let make_source = |url: &str| FfoSourceDocument {
+            url: url.to_owned(),
+            exhibit_type: "EX-99.1".to_owned(),
+            description: "Earnings release".to_owned(),
+            filing_date: "2026-02-03".to_owned(),
+            accession_number: "0000123-26-000001".to_owned(),
+            filing_form: "8-K".to_owned(),
+            filing_index_url: "https://www.sec.gov/index.html".to_owned(),
+        };
+        let documents = vec![
+            (
+                make_source("https://www.sec.gov/results.htm"),
+                Vec::new(),
+                None,
+            ),
+            (
+                make_source("https://www.sec.gov/results.pdf"),
+                Vec::new(),
+                None,
+            ),
+        ];
+
+        assert_unique_source_file_names("0000123-26-000001", &documents);
+    }
+
+    #[test]
     fn symbol_keys_the_sec_source_directory() {
         assert_eq!(
             issuer_source_dir(Path::new("data/ffo/sources"), "VICI"),
             Path::new("data/ffo/sources/VICI")
         );
-    }
-
-    #[test]
-    fn reads_non_empty_cached_source_documents() {
-        let cache_path = std::env::temp_dir().join(format!(
-            "finance-ffo-cache-{}-{}.htm",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        fs::write(&cache_path, b"<html>cached filing</html>").unwrap();
-
-        assert_eq!(
-            read_non_empty_file(&cache_path).unwrap(),
-            Some(b"<html>cached filing</html>".to_vec())
-        );
-        assert_eq!(
-            infer_content_type(&cache_path, b"<html>cached filing</html>").as_deref(),
-            Some("text/html")
-        );
-
-        fs::remove_file(cache_path).unwrap();
     }
 }

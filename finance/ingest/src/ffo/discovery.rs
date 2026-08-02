@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs, path::Path};
+use std::collections::{BTreeSet, HashSet};
 
 use anyhow::{Context, Result};
 use reqwest::Url;
@@ -6,9 +6,13 @@ use scraper::{Html, Selector};
 
 use crate::common::sec_api::{SecFiling, fetch_recent_filings, fetch_sec_text};
 
-use super::{
-    FfoSourceDocument, ReitFfoSources, read_non_empty_file, sanitize_path_component, source_file_name, write_bytes_atomic
-};
+use super::{FfoSourceDocument, ReitFfoSources};
+
+#[derive(Debug)]
+pub(super) struct DiscoveredFiling {
+    pub(super) filing: SecFiling,
+    pub(super) documents: Vec<FfoSourceDocument>,
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct FilingIndexDocument {
@@ -17,11 +21,21 @@ pub(super) struct FilingIndexDocument {
     pub(super) description: String,
 }
 
-pub(super) async fn discover_reit_ffo_sources(
+pub(super) async fn discover_reit_ffo_sources(cik: &str) -> Result<ReitFfoSources> {
+    let filings = discover_reit_ffo_filings(cik, &BTreeSet::new()).await?;
+    Ok(ReitFfoSources {
+        cik: cik.trim_start_matches('0').to_owned(),
+        documents: filings
+            .into_iter()
+            .flat_map(|filing| filing.documents)
+            .collect(),
+    })
+}
+
+pub(super) async fn discover_reit_ffo_filings(
     cik: &str,
-    issuer_dir: Option<&Path>,
-) -> Result<ReitFfoSources> {
-    let normalized_cik = cik.trim_start_matches('0');
+    processed_accessions: &BTreeSet<String>,
+) -> Result<Vec<DiscoveredFiling>> {
     let mut filings = fetch_recent_filings(cik).await?;
     filings.sort_by(|left, right| {
         filing_priority(left)
@@ -30,10 +44,15 @@ pub(super) async fn discover_reit_ffo_sources(
             .then_with(|| right.accession_number.cmp(&left.accession_number))
     });
 
-    let mut documents = Vec::new();
+    let mut discovered = Vec::new();
     let mut seen_urls = HashSet::new();
     for filing in filings {
-        let filing_documents = fetch_filing_index(&filing, issuer_dir).await?;
+        if processed_accessions.contains(&filing.accession_number) {
+            continue;
+        }
+
+        let filing_documents = fetch_filing_index(&filing).await?;
+        let mut documents = Vec::new();
         for document in filing_documents
             .into_iter()
             .filter(|document| is_likely_ffo_source(&filing, document))
@@ -51,45 +70,21 @@ pub(super) async fn discover_reit_ffo_sources(
                 filing_index_url: filing.filing_index_url.clone(),
             });
         }
+        discovered.push(DiscoveredFiling { filing, documents });
     }
-
-    Ok(ReitFfoSources {
-        cik: normalized_cik.to_owned(),
-        documents,
-    })
+    Ok(discovered)
 }
 
-async fn fetch_filing_index(
-    filing: &SecFiling,
-    issuer_dir: Option<&Path>,
-) -> Result<Vec<FilingIndexDocument>> {
-    let html = if let Some(issuer_dir) = issuer_dir {
-        let accession_dir = issuer_dir.join(sanitize_path_component(&filing.accession_number));
-        fs::create_dir_all(&accession_dir)
-            .with_context(|| format!("failed to create {}", accession_dir.display()))?;
-        let index_path = accession_dir.join(source_file_name(&filing.filing_index_url));
-        if let Some(bytes) = read_non_empty_file(&index_path)? {
-            log::debug!(
-                "FFO source - using cached filing index {}",
-                index_path.display()
-            );
-            String::from_utf8_lossy(&bytes).into_owned()
-        } else {
-            let html = fetch_sec_text(&filing.filing_index_url)
-                .await
-                .with_context(|| format!("failed to download {}", filing.filing_index_url))?;
-            if html.is_empty() {
-                anyhow::bail!(
-                    "SEC returned an empty filing index for {}",
-                    filing.filing_index_url
-                );
-            }
-            write_bytes_atomic(&index_path, html.as_bytes())?;
-            html
-        }
-    } else {
-        fetch_sec_text(&filing.filing_index_url).await?
-    };
+async fn fetch_filing_index(filing: &SecFiling) -> Result<Vec<FilingIndexDocument>> {
+    let html = fetch_sec_text(&filing.filing_index_url)
+        .await
+        .with_context(|| format!("failed to download {}", filing.filing_index_url))?;
+    if html.is_empty() {
+        anyhow::bail!(
+            "SEC returned an empty filing index for {}",
+            filing.filing_index_url
+        );
+    }
     Ok(parse_filing_index(&html, &filing.filing_index_url))
 }
 
