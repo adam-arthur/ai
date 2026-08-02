@@ -7,7 +7,6 @@ use std::{
 use anyhow::{Context, Result, bail};
 use once_cell::sync::Lazy;
 use scraper::{Html, Selector};
-use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 const MAX_CONTEXT_ITEMS: usize = 4;
@@ -23,52 +22,24 @@ static CHROME: Lazy<std::result::Result<PathBuf, String>> =
     Lazy::new(|| resolve_chrome().map_err(|error| format!("{error:#}")));
 static STAGING_ID: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Manifest {
-    source_document: String,
-    candidates: Vec<ManifestCandidate>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ManifestCandidate {
-    index: usize,
-    table_index: usize,
-    image: String,
-    score: i32,
-    matched_terms: Vec<String>,
-    context: Vec<String>,
-    viewport_width: u32,
-    viewport_height: u32,
-}
-
 #[derive(Debug)]
 struct Candidate {
     table_index: usize,
     table_html: String,
-    score: i32,
     matched_terms: Vec<String>,
     context: Vec<String>,
 }
 
 #[derive(Debug)]
 struct CandidateScore {
-    score: i32,
     matched_terms: Vec<String>,
 }
 
 pub(super) async fn ensure_candidate_images(
-    source: &Path,
-    content_type: Option<&str>,
-    source_bytes: &[u8],
+    filing_dir: &Path,
+    sources: Vec<(PathBuf, Option<String>, Vec<u8>)>,
 ) -> Result<usize> {
-    if is_pdf(source, content_type, source_bytes) {
-        return Ok(0);
-    }
-
-    let source = source.to_path_buf();
-    let source_bytes = source_bytes.to_vec();
+    let filing_dir = filing_dir.to_path_buf();
     let permit = CHROME_LIMIT
         .clone()
         .acquire_owned()
@@ -76,80 +47,62 @@ pub(super) async fn ensure_candidate_images(
         .context("FFO image-generation semaphore closed")?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        generate_candidate_images(&source, &source_bytes)
+        generate_candidate_images(&filing_dir, sources)
     })
     .await
     .context("FFO image-generation task panicked")?
 }
 
-fn generate_candidate_images(source: &Path, source_bytes: &[u8]) -> Result<usize> {
-    let output_dir = output_dir(source)?;
-    let manifest_path = output_dir.join("manifest.json");
-    if manifest_path.is_file() {
-        let manifest = read_complete_manifest(&manifest_path, &output_dir)?;
-        return Ok(manifest.candidates.len());
-    }
+fn generate_candidate_images(
+    filing_dir: &Path,
+    sources: Vec<(PathBuf, Option<String>, Vec<u8>)>,
+) -> Result<usize> {
+    let output_dir = filing_dir.join("vision");
     if output_dir.exists() {
-        bail!(
-            "{} exists without a complete manifest; remove it before regenerating",
-            output_dir.display()
-        );
+        return count_candidate_images(&output_dir);
     }
 
-    let html = String::from_utf8_lossy(source_bytes);
-    let candidates = find_candidates(&html);
-    let output_parent = output_dir
-        .parent()
-        .context("FFO image output has no parent directory")?;
-    fs::create_dir_all(output_parent)
-        .with_context(|| format!("failed to create {}", output_parent.display()))?;
     let staging_dir = staging_dir(&output_dir)?;
     fs::create_dir(&staging_dir)
         .with_context(|| format!("failed to create {}", staging_dir.display()))?;
 
-    let source_document = source
-        .file_name()
-        .context("source document has no file name")?
-        .to_string_lossy()
-        .into_owned();
-    let mut manifest = Manifest {
-        source_document,
-        candidates: Vec::with_capacity(candidates.len()),
-    };
-
     let result = (|| {
-        if !candidates.is_empty() {
-            let chrome = chrome()?;
-            for (offset, candidate) in candidates.into_iter().enumerate() {
-                let index = offset + 1;
-                let image_name = format!("candidate-{index:03}.png");
-                let image_path = staging_dir.join(&image_name);
-                let evidence_html = evidence_document(&candidate);
-                let dimensions =
+        let mut image_count = 0;
+        for (source, content_type, source_bytes) in sources {
+            if is_pdf(&source, content_type.as_deref(), &source_bytes) {
+                continue;
+            }
+            let source_document = source
+                .file_name()
+                .context("source document has no file name")?
+                .to_string_lossy();
+            let candidates = find_candidates(&String::from_utf8_lossy(&source_bytes));
+            if !candidates.is_empty() {
+                let chrome = chrome()?;
+                for (offset, candidate) in candidates.into_iter().enumerate() {
+                    let index = offset + 1;
+                    let image_name = candidate_image_name(&source_document, index);
+                    let image_path = staging_dir.join(&image_name);
+                    let evidence_html = evidence_document(&candidate);
                     render_candidate(chrome, &staging_dir, index, &evidence_html, &image_path)?;
-                manifest.candidates.push(ManifestCandidate {
-                    index,
-                    table_index: candidate.table_index,
-                    image: image_name,
-                    score: candidate.score,
-                    matched_terms: candidate.matched_terms,
-                    context: candidate.context,
-                    viewport_width: dimensions.0,
-                    viewport_height: dimensions.1,
-                });
+                    image_count += 1;
+                }
             }
         }
 
-        write_manifest(&staging_dir.join("manifest.json"), &manifest)?;
         fs::rename(&staging_dir, &output_dir)
             .with_context(|| format!("failed to replace {}", output_dir.display()))?;
-        Ok(manifest.candidates.len())
+        Ok(image_count)
     })();
 
     if result.is_err() {
         let _ = fs::remove_dir_all(&staging_dir);
     }
     result
+}
+
+fn candidate_image_name(source_document: &str, index: usize) -> String {
+    format!("{source_document}-{index}.png")
 }
 
 fn is_pdf(source: &Path, content_type: Option<&str>, bytes: &[u8]) -> bool {
@@ -172,31 +125,13 @@ fn staging_dir(output_dir: &Path) -> Result<PathBuf> {
     Ok(parent.join(format!(".{name}.tmp-{}-{id}", std::process::id())))
 }
 
-fn output_dir(source: &Path) -> Result<PathBuf> {
-    let parent = source
-        .parent()
-        .context("source document has no parent directory")?;
-    let stem = source
-        .file_stem()
-        .context("source document has no file stem")?;
-    Ok(parent.join("vision_ffo").join(stem))
-}
-
-fn read_complete_manifest(path: &Path, output_dir: &Path) -> Result<Manifest> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let manifest: Manifest = serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
-    for candidate in &manifest.candidates {
-        let image = output_dir.join(&candidate.image);
-        if !image.is_file() {
-            bail!(
-                "cached manifest references missing image {}; remove {} before regenerating",
-                image.display(),
-                output_dir.display()
-            );
-        }
-    }
-    Ok(manifest)
+fn count_candidate_images(output_dir: &Path) -> Result<usize> {
+    fs::read_dir(output_dir)
+        .with_context(|| format!("failed to read {}", output_dir.display()))?
+        .try_fold(0, |count, entry| {
+            let entry = entry?;
+            Ok(count + usize::from(entry.file_type()?.is_file()))
+        })
 }
 
 fn find_candidates(source: &str) -> Vec<Candidate> {
@@ -230,7 +165,6 @@ fn find_candidates(source: &str) -> Vec<Candidate> {
         candidates.push(Candidate {
             table_index,
             table_html: element.html(),
-            score: candidate_score.score,
             matched_terms: candidate_score.matched_terms,
             context: context.iter().cloned().collect(),
         });
@@ -301,10 +235,7 @@ fn score_candidate(text: &str) -> Option<CandidateScore> {
     score += phrase_score(&lower, &["in thousands", "in millions"], 3);
     score -= phrase_score(&lower, &["definition", "we define"], 6);
 
-    (score >= MIN_CANDIDATE_SCORE).then_some(CandidateScore {
-        score,
-        matched_terms,
-    })
+    (score >= MIN_CANDIDATE_SCORE).then_some(CandidateScore { matched_terms })
 }
 
 fn phrase_score(text: &str, phrases: &[&str], points: i32) -> i32 {
@@ -509,18 +440,33 @@ fn chrome() -> Result<&'static Path> {
         .map_err(|error| anyhow::anyhow!(error.clone()))
 }
 
-fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
-    let temporary = path.with_extension("json.tmp");
-    let mut bytes = serde_json::to_vec_pretty(manifest)?;
-    bytes.push(b'\n');
-    fs::write(&temporary, bytes)
-        .with_context(|| format!("failed to write {}", temporary.display()))?;
-    fs::rename(&temporary, path).with_context(|| format!("failed to replace {}", path.display()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_candidates_after_the_complete_source_file_name() {
+        assert_eq!(
+            candidate_image_name("q42025supplemental.htm", 2),
+            "q42025supplemental.htm-2.png"
+        );
+    }
+
+    #[test]
+    fn vision_directory_marks_a_filing_complete_even_when_empty() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "ffo-vision-test-{}-{}",
+            std::process::id(),
+            STAGING_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&test_dir).unwrap();
+
+        assert_eq!(generate_candidate_images(&test_dir, Vec::new()).unwrap(), 0);
+        assert!(test_dir.join("vision").is_dir());
+        assert_eq!(generate_candidate_images(&test_dir, Vec::new()).unwrap(), 0);
+
+        fs::remove_dir_all(test_dir).unwrap();
+    }
 
     #[test]
     fn finds_numeric_ffo_table_and_retains_nearby_context() {

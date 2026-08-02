@@ -96,6 +96,7 @@ pub async fn fetch_reit_ffo_data(
         fs::create_dir(&document_dir)
             .with_context(|| format!("failed to create {}", document_dir.display()))?;
 
+        let mut vision_sources = Vec::new();
         for (source, bytes, content_type) in fetched_documents {
             let local_path = document_dir.join(source_file_name(&source.url));
             assert!(
@@ -105,19 +106,7 @@ pub async fn fetch_reit_ffo_data(
                 accession
             );
             write_bytes_atomic(&local_path, &bytes)?;
-
-            match vision::ensure_candidate_images(&local_path, content_type.as_deref(), &bytes)
-                .await
-            {
-                Ok(count) => log::debug!(
-                    "FFO vision - cached {count} candidate image(s) for {}",
-                    local_path.display()
-                ),
-                Err(error) => log::warn!(
-                    "FFO vision - failed for {}: {error:#}",
-                    local_path.display()
-                ),
-            }
+            vision_sources.push((local_path, content_type, bytes));
 
             // HTML value extraction is intentionally paused while the screenshot-first pipeline is
             // developed. Keep the source document in the canonicalization input so SEC pulling and
@@ -127,6 +116,25 @@ pub async fn fetch_reit_ffo_data(
                 values: Vec::new(),
             });
         }
+
+        let image_count = match vision::ensure_candidate_images(&document_dir, vision_sources).await
+        {
+            Ok(count) => count,
+            Err(error) => {
+                fs::remove_dir_all(&document_dir).with_context(|| {
+                    format!(
+                        "FFO vision failed and incomplete filing directory could not be removed: {}",
+                        document_dir.display()
+                    )
+                })?;
+                return Err(error)
+                    .with_context(|| format!("FFO vision failed for {}", document_dir.display()));
+            }
+        };
+        log::debug!(
+            "FFO vision - cached {image_count} candidate image(s) in {}",
+            document_dir.join("vision").display()
+        );
         mark_accession_processed(&processed_path, &mut processed_accessions, accession)?;
     }
 
@@ -204,21 +212,11 @@ fn assert_unique_source_file_names(
     documents: &[(FfoSourceDocument, Vec<u8>, Option<String>)],
 ) {
     let mut names = HashSet::new();
-    let mut vision_keys = HashSet::new();
     for (source, _, _) in documents {
         let name = source_file_name(&source.url);
         assert!(
             names.insert(name.to_ascii_lowercase()),
             "FFO source filename collision for {name} in filing {accession}"
-        );
-        let vision_key = Path::new(&name)
-            .file_stem()
-            .expect("FFO source filename has no stem")
-            .to_string_lossy()
-            .to_ascii_lowercase();
-        assert!(
-            vision_keys.insert(vision_key.clone()),
-            "FFO vision output collision for {vision_key} in filing {accession}"
         );
     }
 }
@@ -683,8 +681,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "FFO vision output collision")]
-    fn panics_when_source_extensions_would_share_a_vision_directory() {
+    fn allows_source_extensions_to_share_a_stem() {
         let make_source = |url: &str| FfoSourceDocument {
             url: url.to_owned(),
             exhibit_type: "EX-99.1".to_owned(),
