@@ -3,8 +3,11 @@ use std::collections::{BTreeSet, HashSet};
 use anyhow::{Context, Result};
 use reqwest::Url;
 use scraper::{Html, Selector};
+use time::{Date, macros::format_description};
 
-use crate::common::sec_api::{SecFiling, fetch_recent_filings, fetch_sec_text};
+use crate::{
+    common::sec_api::{SecFiling, fetch_recent_filings, fetch_sec_text}, ingest_utils::DATA_FETCH_START_DATE
+};
 
 use super::{FfoSourceDocument, ReitFfoSources};
 
@@ -37,6 +40,7 @@ pub(super) async fn discover_reit_ffo_filings(
     processed_accessions: &BTreeSet<String>,
 ) -> Result<Vec<DiscoveredFiling>> {
     let mut filings = fetch_recent_filings(cik).await?;
+    filings.retain(is_within_data_fetch_period);
     filings.sort_by(|left, right| {
         filing_priority(left)
             .cmp(&filing_priority(right))
@@ -73,6 +77,12 @@ pub(super) async fn discover_reit_ffo_filings(
         discovered.push(DiscoveredFiling { filing, documents });
     }
     Ok(discovered)
+}
+
+pub(super) fn is_within_data_fetch_period(filing: &SecFiling) -> bool {
+    let source_date = filing.report_date.as_deref().unwrap_or(&filing.filing_date);
+    Date::parse(source_date, format_description!("[year]-[month]-[day]"))
+        .is_ok_and(|source_date| source_date >= DATA_FETCH_START_DATE)
 }
 
 async fn fetch_filing_index(filing: &SecFiling) -> Result<Vec<FilingIndexDocument>> {

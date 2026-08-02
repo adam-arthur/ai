@@ -379,6 +379,7 @@ use extract::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingest_utils::DATA_FETCH_START_DATE;
 
     const INDEX_HTML: &str = r#"
         <html><body>
@@ -452,6 +453,23 @@ mod tests {
         assert_eq!(filing_priority(&filing("10-Q", &[], "quarter.htm")), 1);
         assert_eq!(filing_priority(&filing("10-K/A", &[], "annual.htm")), 2);
         assert_eq!(filing_priority(&filing("8-K", &["7.01"], "form8-k.htm")), 3);
+    }
+
+    #[test]
+    fn limits_ffo_sources_to_the_centralized_data_fetch_period() {
+        let mut before_cutoff = filing("10-K", &[], "annual.htm");
+        before_cutoff.report_date = Some("2015-12-31".to_owned());
+        let mut at_cutoff = before_cutoff.clone();
+        at_cutoff.report_date = Some(DATA_FETCH_START_DATE.to_string());
+        let mut filing_date_fallback = at_cutoff.clone();
+        filing_date_fallback.report_date = None;
+        filing_date_fallback.filing_date = DATA_FETCH_START_DATE.to_string();
+
+        assert!(!discovery::is_within_data_fetch_period(&before_cutoff));
+        assert!(discovery::is_within_data_fetch_period(&at_cutoff));
+        assert!(discovery::is_within_data_fetch_period(
+            &filing_date_fallback
+        ));
     }
 
     #[test]
