@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap}, env, num::NonZeroU32, time::Duration
+    collections::{BTreeMap, HashMap}, env, future::Future, num::NonZeroU32, time::Duration
 };
 
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
@@ -7,6 +7,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, de::DeserializeOwned};
 use time::{Date, macros::format_description};
 use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::time::sleep;
 
 use crate::{
     financials::models::{Company, QuarterlyData}, meta_utils::YieldWatchError
@@ -16,6 +17,7 @@ use super::HTTP;
 
 const SEC_REQUEST_PERIOD: Duration = Duration::from_nanos(111_111_112);
 const SEC_MAX_IN_FLIGHT: usize = 4;
+const SEC_MAX_RETRIES: u32 = 3;
 
 static SEC_API_RATE_LIMITER: Lazy<DefaultDirectRateLimiter> = Lazy::new(|| {
     // Start just under nine requests per second, leaving headroom below the SEC ceiling of ten.
@@ -468,30 +470,31 @@ where
         panic!("Invalid path!")
     }
 
-    let _permit = sec_request_permit().await;
-
-    let response = HTTP
-        .get(format!("{base_url}{path}"))
-        .header("User-Agent", SEC_USER_AGENT.as_str())
-        .send()
-        .await?
-        .error_for_status()?;
-
-    Ok(response.json::<T>().await?)
+    let url = format!("{base_url}{path}");
+    retry_sec_request(&url, || async {
+        HTTP.get(&url)
+            .header("User-Agent", SEC_USER_AGENT.as_str())
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<T>()
+            .await
+    })
+    .await
 }
 
 /// Fetches a text document from SEC.gov using the shared fair-access throttle and user agent.
 pub(crate) async fn fetch_sec_text(url: &str) -> Result<String, YieldWatchError> {
-    let _permit = sec_request_permit().await;
-
-    Ok(HTTP
-        .get(url)
-        .header("User-Agent", SEC_USER_AGENT.as_str())
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?)
+    retry_sec_request(url, || async {
+        HTTP.get(url)
+            .header("User-Agent", SEC_USER_AGENT.as_str())
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await
+    })
+    .await
 }
 
 /// Downloads an SEC-hosted document as bytes using the shared fair-access controls.
@@ -501,21 +504,65 @@ pub(crate) async fn fetch_sec_text(url: &str) -> Result<String, YieldWatchError>
 pub(crate) async fn fetch_sec_document(
     url: &str,
 ) -> Result<(Vec<u8>, Option<String>), YieldWatchError> {
-    let _permit = sec_request_permit().await;
+    retry_sec_request(url, || async {
+        let response = HTTP
+            .get(url)
+            .header("User-Agent", SEC_USER_AGENT.as_str())
+            .send()
+            .await?
+            .error_for_status()?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
 
-    let response = HTTP
-        .get(url)
-        .header("User-Agent", SEC_USER_AGENT.as_str())
-        .send()
-        .await?
-        .error_for_status()?;
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+        Ok((response.bytes().await?.to_vec(), content_type))
+    })
+    .await
+}
 
-    Ok((response.bytes().await?.to_vec(), content_type))
+async fn retry_sec_request<T, F, Fut>(url: &str, mut request: F) -> Result<T, YieldWatchError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, reqwest::Error>>,
+{
+    for attempt in 0..=SEC_MAX_RETRIES {
+        let result = {
+            let _permit = sec_request_permit().await;
+            request().await
+        };
+
+        match result {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt < SEC_MAX_RETRIES && is_retryable_sec_error(&error) => {
+                let delay = sec_retry_delay(attempt);
+                log::warn!(
+                    "SEC request failed for {url} (attempt {}): {error}; retrying in {:.1}s",
+                    attempt + 1,
+                    delay.as_secs_f32()
+                );
+                sleep(delay).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    unreachable!("SEC retry loop always returns")
+}
+
+fn is_retryable_sec_error(error: &reqwest::Error) -> bool {
+    error.is_timeout()
+        || error.is_connect()
+        || error.is_request()
+        || error.is_body()
+        || error.status().is_some_and(|status| {
+            status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+        })
+}
+
+fn sec_retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs(2u64.pow(attempt.min(5)))
 }
 
 async fn sec_request_permit() -> SemaphorePermit<'static> {
