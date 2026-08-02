@@ -2,9 +2,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::{
     ModelRequest, ModelResponse, ModelRole, ModelUsage,
-    openai::{
+    openai_compatible::{
         ChatContent, ChatContentPart, ChatMessage, ChatRequest, ImageUrl, JsonSchemaFormat,
-        OpenAiClient, ResponseFormat, Role,
+        OpenAiCompatibleClient, ResponseFormat, Role,
     },
 };
 
@@ -13,7 +13,7 @@ use super::{LlamaClientError, LlamaConfig};
 /// Typed convenience client for the configured Llama server.
 #[derive(Clone, Debug)]
 pub struct LlamaClient {
-    openai: OpenAiClient,
+    openai: OpenAiCompatibleClient,
 }
 
 impl LlamaClient {
@@ -28,7 +28,7 @@ impl LlamaClient {
 
     pub fn from_config(config: LlamaConfig) -> Self {
         Self {
-            openai: OpenAiClient::from_url(config.server().clone()),
+            openai: OpenAiCompatibleClient::from_url(config.server().clone()),
         }
     }
 

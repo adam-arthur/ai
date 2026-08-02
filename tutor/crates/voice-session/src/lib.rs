@@ -1,9 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
-use language_tutor::{
-    ConversationMessage, KoreanTutor, KoreanTutorLevel, KoreanTutorMistake, ModelConfiguration,
-};
-use llm_core::Audio;
+use language_tutor::{ConversationMessage, KoreanTutor, KoreanTutorLevel, KoreanTutorMistake, ModelConfiguration};
+use llm::Audio;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast};
 use uuid::Uuid;
@@ -64,10 +62,7 @@ impl SessionService {
     /// # Errors
     ///
     /// Returns [`SessionError::NotFound`] when the session does not exist.
-    pub async fn subscribe(
-        &self,
-        id: Uuid,
-    ) -> Result<broadcast::Receiver<SessionEvent>, SessionError> {
+    pub async fn subscribe(&self, id: Uuid) -> Result<broadcast::Receiver<SessionEvent>, SessionError> {
         let session = self.session(id).await?;
         Ok(session.lock().await.events.subscribe())
     }
@@ -79,10 +74,7 @@ impl SessionService {
     /// Returns an error when the session is missing, the audio is invalid, or tutor processing
     /// fails.
     pub async fn process_audio_turn(
-        &self,
-        id: Uuid,
-        input_id: Option<String>,
-        audio: Audio,
+        &self, id: Uuid, input_id: Option<String>, audio: Audio,
     ) -> Result<(), SessionError> {
         let session = self.session(id).await?;
         let mut session = session.lock().await;
@@ -105,7 +97,7 @@ impl SessionService {
                     message: message.clone(),
                 });
                 return Err(SessionError::Turn(message));
-            }
+            },
         };
 
         session.conversation.push(ConversationMessage {
@@ -177,10 +169,8 @@ fn to_transcription_audio(audio: Audio) -> Result<Audio, SessionError> {
         .find_map(|part| part.strip_prefix("rate="))
         .and_then(|rate| rate.parse::<u32>().ok())
         .filter(|rate| *rate > 0)
-        .ok_or_else(|| {
-            SessionError::InvalidAudio("PCM audio must include a sample rate".to_owned())
-        })?;
-    if audio.data.len() % 2 != 0 {
+        .ok_or_else(|| SessionError::InvalidAudio("PCM audio must include a sample rate".to_owned()))?;
+    if !audio.data.len().is_multiple_of(2) {
         return Err(SessionError::InvalidAudio(
             "PCM audio must contain complete 16-bit samples".to_owned(),
         ));

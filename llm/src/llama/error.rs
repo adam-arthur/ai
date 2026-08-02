@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::openai::OpenAiClientError;
+use crate::openai_compatible::OpenAiCompatibleError;
 
 use super::LlamaConfigError;
 
@@ -9,7 +9,7 @@ pub enum LlamaClientError {
     #[error(transparent)]
     Config(#[from] LlamaConfigError),
     #[error(transparent)]
-    Client(#[from] OpenAiClientError),
+    Client(#[from] OpenAiCompatibleError),
     #[error("model backend returned no choices")]
     EmptyResponse,
 }

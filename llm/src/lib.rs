@@ -9,12 +9,19 @@
 
 pub use async_trait::async_trait;
 
+mod audio;
 mod client;
+mod google;
 mod llama;
 mod model;
 mod openai;
+mod openai_compatible;
 
-pub use client::{AskRequest, ClientError, ask};
+pub use audio::{
+    Audio, SpeechSynthesisModelId, SpeechSynthesisRequest, TranscriptionModelId,
+    TranscriptionRequest,
+};
+pub use client::{AskRequest, ClientError, ask, complete, synthesize, transcribe};
 pub use model::{
     ImageInput, Model, ModelError, ModelId, ModelMessage, ModelRequest, ModelResponse,
     ModelResponseSchema, ModelRole, ModelUsage, ParseModelIdError,

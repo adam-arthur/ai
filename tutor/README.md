@@ -4,11 +4,9 @@ A personal Korean voice tutor with a Rust server and a Svelte browser interface.
 
 ## Workspace
 
-- `apps/tutor-server`: executable, configuration, and dependency wiring
+- `apps/tutor-server`: executable and HTTP server setup
 - `apps/tutor`: Svelte UI and browser audio controls
-- `crates/llm-core`: provider-neutral model traits and data types
-- `crates/llm-openai`: OpenAI text, transcription, and speech REST adapter
-- `crates/llm-google`: Gemini text REST adapter
+- `../llm`: shared model, transcription, and speech backends
 - `crates/language-tutor`: Korean tutoring prompts and turn processing
 - `crates/voice-session`: in-memory turn session lifecycle
 - `crates/tutor-api`: HTTP/SSE routes and generated browser contracts

@@ -6,7 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-llm-core = { path = "../llm-core" }
+llm.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -14,4 +15,3 @@ ts-rs.workspace = true
 
 [lints]
 workspace = true
-

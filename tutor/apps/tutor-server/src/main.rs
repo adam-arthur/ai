@@ -2,8 +2,6 @@ use std::{env, net::SocketAddr, sync::Arc};
 
 use anyhow::{Context as _, Result};
 use language_tutor::KoreanTutor;
-use llm_google::GeminiClient;
-use llm_openai::OpenAiClient;
 use tokio::net::TcpListener;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::info;
@@ -17,19 +15,11 @@ async fn main() -> Result<()> {
     dotenvy::from_filename("packages/llm/.env").ok();
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("tutor_server=info,tower_http=info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("tutor_server=info,tower_http=info")),
         )
         .init();
 
-    let openai = Arc::new(OpenAiClient::new(required_env("OPENAI_API_KEY")?));
-    let gemini = Arc::new(GeminiClient::new(required_env("GEMINI_API_KEY")?));
-    let tutor = Arc::new(KoreanTutor::new(
-        gemini,
-        openai.clone(),
-        openai.clone(),
-        openai,
-    ));
+    let tutor = Arc::new(KoreanTutor::new());
     let sessions = Arc::new(SessionService::new(tutor));
     let app = tutor_api::router(sessions)
         .fallback_service(ServeDir::new("apps/tutor/dist").append_index_html_on_directories(true))
@@ -44,11 +34,6 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
-}
-
-fn required_env(name: &str) -> Result<String> {
-    env::var(name)
-        .with_context(|| format!("set {name} in the environment or a repository-root .env file"))
 }
 
 async fn shutdown_signal() {

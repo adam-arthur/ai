@@ -1,11 +1,12 @@
-use std::{error::Error, fmt, sync::OnceLock};
+use std::{env, error::Error, fmt, sync::OnceLock};
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 
 use crate::{
-    ImageInput, Model, ModelError, ModelId, ModelMessage, ModelRequest, ModelResponse,
-    ModelResponseSchema, async_trait, llama::LlamaClient, model::Backend,
+    Audio, ImageInput, Model, ModelError, ModelId, ModelMessage, ModelRequest, ModelResponse,
+    ModelResponseSchema, SpeechSynthesisRequest, TranscriptionRequest, async_trait,
+    google::GeminiClient, llama::LlamaClient, model::Backend, openai::OpenAiClient,
 };
 
 static DEFAULT_CLIENT: OnceLock<Client> = OnceLock::new();
@@ -16,7 +17,22 @@ pub async fn ask<T>(request: AskRequest) -> Result<T, ClientError>
 where
     T: JsonSchema + DeserializeOwned,
 {
-    default_client()?.ask(request).await
+    default_client().ask(request).await
+}
+
+/// Completes a provider-neutral model request using process environment configuration.
+pub async fn complete(request: ModelRequest) -> Result<ModelResponse, ClientError> {
+    default_client().complete_request(request).await
+}
+
+/// Transcribes audio using the configured OpenAI API credentials.
+pub async fn transcribe(request: TranscriptionRequest) -> Result<String, ClientError> {
+    default_client().transcribe(request).await
+}
+
+/// Synthesizes speech using the configured OpenAI API credentials.
+pub async fn synthesize(request: SpeechSynthesisRequest) -> Result<Audio, ClientError> {
+    default_client().synthesize(request).await
 }
 
 /// Options for asking a model a single user question.
@@ -41,27 +57,25 @@ impl AskRequest {
     }
 }
 
-fn default_client() -> Result<&'static Client, ClientError> {
-    if let Some(client) = DEFAULT_CLIENT.get() {
-        return Ok(client);
-    }
-
-    let client = Client::from_env()?;
-    Ok(DEFAULT_CLIENT.get_or_init(|| client))
+fn default_client() -> &'static Client {
+    DEFAULT_CLIENT.get_or_init(Client::new)
 }
 
 /// Provider-neutral client that routes each model to its backend.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct Client {
-    llama: LlamaClient,
+    gemini: OnceLock<GeminiClient>,
+    llama: OnceLock<LlamaClient>,
+    openai: OnceLock<OpenAiClient>,
 }
 
 impl Client {
-    /// Configures all model backends from the process environment.
-    fn from_env() -> Result<Self, ClientError> {
-        Ok(Self {
-            llama: LlamaClient::from_env().map_err(ClientError::new)?,
-        })
+    const fn new() -> Self {
+        Self {
+            gemini: OnceLock::new(),
+            llama: OnceLock::new(),
+            openai: OnceLock::new(),
+        }
     }
 
     /// Sends a single user prompt to the selected model backend.
@@ -77,9 +91,68 @@ impl Client {
 
     async fn complete_request(&self, request: ModelRequest) -> Result<ModelResponse, ClientError> {
         match request.model.backend() {
-            Backend::Llama => self.llama.complete(request).await.map_err(ClientError::new),
+            Backend::Gemini => self
+                .gemini()?
+                .complete(request)
+                .await
+                .map_err(ClientError::new),
+            Backend::Llama => self
+                .llama()?
+                .complete(request)
+                .await
+                .map_err(ClientError::new),
+            Backend::OpenAi => self
+                .openai()?
+                .complete(request)
+                .await
+                .map_err(ClientError::new),
         }
     }
+
+    async fn transcribe(&self, request: TranscriptionRequest) -> Result<String, ClientError> {
+        self.openai()?
+            .transcribe(request)
+            .await
+            .map_err(ClientError::new)
+    }
+
+    async fn synthesize(&self, request: SpeechSynthesisRequest) -> Result<Audio, ClientError> {
+        self.openai()?
+            .synthesize(request)
+            .await
+            .map_err(ClientError::new)
+    }
+
+    fn gemini(&self) -> Result<&GeminiClient, ClientError> {
+        if let Some(client) = self.gemini.get() {
+            return Ok(client);
+        }
+        let api_key = required_env("GEMINI_API_KEY")?;
+        Ok(self.gemini.get_or_init(|| GeminiClient::new(api_key)))
+    }
+
+    fn llama(&self) -> Result<&LlamaClient, ClientError> {
+        if let Some(client) = self.llama.get() {
+            return Ok(client);
+        }
+        let client = LlamaClient::from_env().map_err(ClientError::new)?;
+        Ok(self.llama.get_or_init(|| client))
+    }
+
+    fn openai(&self) -> Result<&OpenAiClient, ClientError> {
+        if let Some(client) = self.openai.get() {
+            return Ok(client);
+        }
+        let api_key = required_env("OPENAI_API_KEY")?;
+        Ok(self.openai.get_or_init(|| OpenAiClient::new(api_key)))
+    }
+}
+
+fn required_env(name: &'static str) -> Result<String, ClientError> {
+    env::var(name).map_err(|source| ClientError {
+        message: format!("failed to read `{name}`: {source}"),
+        source: Some(Box::new(source)),
+    })
 }
 
 #[async_trait]

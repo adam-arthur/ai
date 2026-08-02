@@ -1,11 +1,7 @@
-use std::{fmt::Write as _, sync::Arc};
+use std::fmt::Write as _;
 
-use llm_core::{
-    Audio, SpeechSynthesisRequest, SpeechSynthesizer, SpeechTranscriber, TextGenerator,
-    TextRequest, TranscriptionRequest,
-};
+use llm::{Audio, JsonSchema, ModelId, ModelMessage, ModelRequest, ModelResponseSchema, SpeechSynthesisModelId, SpeechSynthesisRequest, TranscriptionModelId, TranscriptionRequest, complete, synthesize, transcribe};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use thiserror::Error;
 use ts_rs::TS;
 
@@ -28,18 +24,13 @@ pub enum TextModel {
     Gpt55,
 }
 
-impl TextModel {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Gemini31FlashLite => "gemini-3.1-flash-lite",
-            Self::Gemini35Flash => "gemini-3.5-flash",
-            Self::Gpt55 => "gpt-5.5",
+impl From<TextModel> for ModelId {
+    fn from(model: TextModel) -> Self {
+        match model {
+            TextModel::Gemini31FlashLite => Self::Gemini31FlashLite,
+            TextModel::Gemini35Flash => Self::Gemini35Flash,
+            TextModel::Gpt55 => Self::Gpt55,
         }
-    }
-
-    const fn is_openai(self) -> bool {
-        matches!(self, Self::Gpt55)
     }
 }
 
@@ -53,12 +44,11 @@ pub enum TranscriptionModel {
     Gpt4oTranscribe,
 }
 
-impl TranscriptionModel {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Gpt4oMiniTranscribe => "gpt-4o-mini-transcribe",
-            Self::Gpt4oTranscribe => "gpt-4o-transcribe",
+impl From<TranscriptionModel> for TranscriptionModelId {
+    fn from(model: TranscriptionModel) -> Self {
+        match model {
+            TranscriptionModel::Gpt4oMiniTranscribe => Self::Gpt4oMiniTranscribe,
+            TranscriptionModel::Gpt4oTranscribe => Self::Gpt4oTranscribe,
         }
     }
 }
@@ -70,11 +60,10 @@ pub enum SpeechSynthesisModel {
     Tts1,
 }
 
-impl SpeechSynthesisModel {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Tts1 => "tts-1",
+impl From<SpeechSynthesisModel> for SpeechSynthesisModelId {
+    fn from(model: SpeechSynthesisModel) -> Self {
+        match model {
+            SpeechSynthesisModel::Tts1 => Self::Tts1,
         }
     }
 }
@@ -100,7 +89,7 @@ impl Default for ModelConfiguration {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(rename_all = "lowercase")]
 pub enum KoreanTutorMistakeKind {
@@ -110,7 +99,7 @@ pub enum KoreanTutorMistakeKind {
     Naturalness,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, TS)]
 pub struct KoreanTutorMistake {
     pub kind: KoreanTutorMistakeKind,
     pub original: String,
@@ -138,27 +127,12 @@ pub struct TurnResult {
     pub response_audio: Audio,
 }
 
-pub struct KoreanTutor {
-    google_text: Arc<dyn TextGenerator>,
-    openai_text: Arc<dyn TextGenerator>,
-    transcriber: Arc<dyn SpeechTranscriber>,
-    synthesizer: Arc<dyn SpeechSynthesizer>,
-}
+pub struct KoreanTutor;
 
 impl KoreanTutor {
     #[must_use]
-    pub fn new(
-        google_text: Arc<dyn TextGenerator>,
-        openai_text: Arc<dyn TextGenerator>,
-        transcriber: Arc<dyn SpeechTranscriber>,
-        synthesizer: Arc<dyn SpeechSynthesizer>,
-    ) -> Self {
-        Self {
-            google_text,
-            openai_text,
-            transcriber,
-            synthesizer,
-        }
+    pub const fn new() -> Self {
+        Self
     }
 
     /// Processes one complete learner audio turn.
@@ -168,27 +142,21 @@ impl KoreanTutor {
     /// Returns an error when a provider request fails, mistake JSON is invalid, or the tutor
     /// produces no response text.
     pub async fn process_turn(
-        &self,
-        level: KoreanTutorLevel,
-        models: ModelConfiguration,
-        conversation: &[ConversationMessage],
-        audio: Audio,
+        &self, level: KoreanTutorLevel, models: ModelConfiguration, conversation: &[ConversationMessage], audio: Audio,
     ) -> Result<TurnResult, TutorError> {
-        let transcription = self
-            .transcriber
-            .transcribe(TranscriptionRequest {
-                model: models.transcription.as_str().to_owned(),
-                audio,
-                prompt: Some(
-                    "The audio may contain Korean learner speech, Hangul, romanized Korean, and occasional English."
-                        .to_owned(),
-                ),
-                language_code: None,
-            })
-            .await
-            .map_err(TutorError::Provider)?
-            .trim()
-            .to_owned();
+        let transcription = transcribe(TranscriptionRequest {
+            model: models.transcription.into(),
+            audio,
+            prompt: Some(
+                "The audio may contain Korean learner speech, Hangul, romanized Korean, and occasional English."
+                    .to_owned(),
+            ),
+            language_code: None,
+        })
+        .await
+        .map_err(TutorError::Provider)?
+        .trim()
+        .to_owned();
 
         let previous_tutor_text = conversation
             .iter()
@@ -196,41 +164,33 @@ impl KoreanTutor {
             .find(|message| matches!(message.role, ConversationRole::Tutor))
             .map(|message| message.text.as_str());
         let mistakes = self
-            .detect_mistakes(
-                level,
-                models.mistake_detection,
-                &transcription,
-                previous_tutor_text,
-            )
+            .detect_mistakes(level, models.mistake_detection, &transcription, previous_tutor_text)
             .await?;
         let prompt = response_prompt(conversation, &transcription, &mistakes);
-        let response_text = self
-            .text_generator(models.reply)
-            .generate(TextRequest {
-                model: models.reply.as_str().to_owned(),
-                system_prompt: Some(system_prompt(level).to_owned()),
-                prompt,
-                json_schema: None,
-                max_output_tokens: Some(350),
-                temperature: None,
-            })
-            .await
-            .map_err(TutorError::Provider)?
-            .trim()
-            .to_owned();
+        let response_text = complete(
+            ModelRequest::builder(
+                models.reply.into(),
+                [ModelMessage::system(system_prompt(level)), ModelMessage::user(prompt)],
+            )
+            .max_tokens(350)
+            .build(),
+        )
+        .await
+        .map_err(TutorError::Provider)?
+        .content
+        .trim()
+        .to_owned();
         if response_text.is_empty() {
             return Err(TutorError::EmptyResponse);
         }
-        let response_audio = self
-            .synthesizer
-            .synthesize(SpeechSynthesisRequest {
-                model: models.speech_synthesis.as_str().to_owned(),
-                text: response_text.clone(),
-                voice: "nova".to_owned(),
-                instructions: None,
-            })
-            .await
-            .map_err(TutorError::Provider)?;
+        let response_audio = synthesize(SpeechSynthesisRequest {
+            model: models.speech_synthesis.into(),
+            text: response_text.clone(),
+            voice: "nova".to_owned(),
+            instructions: None,
+        })
+        .await
+        .map_err(TutorError::Provider)?;
 
         Ok(TurnResult {
             transcription,
@@ -241,11 +201,7 @@ impl KoreanTutor {
     }
 
     async fn detect_mistakes(
-        &self,
-        level: KoreanTutorLevel,
-        model: TextModel,
-        transcription: &str,
-        previous_tutor_text: Option<&str>,
+        &self, level: KoreanTutorLevel, model: TextModel, transcription: &str, previous_tutor_text: Option<&str>,
     ) -> Result<Vec<KoreanTutorMistake>, TutorError> {
         if transcription.trim().is_empty() {
             return Ok(Vec::new());
@@ -256,66 +212,38 @@ impl KoreanTutor {
                 .map(|text| format!("\nPrevious tutor message:\n{text}\n"))
                 .unwrap_or_default()
         );
-        let text = self
-            .text_generator(model)
-            .generate(TextRequest {
-                model: model.as_str().to_owned(),
-                system_prompt: Some(MISTAKE_SYSTEM_PROMPT.to_owned()),
-                prompt,
-                json_schema: Some(mistake_schema()),
-                max_output_tokens: Some(300),
-                temperature: None,
-            })
-            .await
-            .map_err(TutorError::Provider)?;
-        let response: MistakeResponse =
-            serde_json::from_str(&text).map_err(TutorError::InvalidMistakes)?;
+        let text = complete(
+            ModelRequest::builder(
+                model.into(),
+                [ModelMessage::system(MISTAKE_SYSTEM_PROMPT), ModelMessage::user(prompt)],
+            )
+            .response_schema(ModelResponseSchema::for_type::<MistakeResponse>())
+            .max_tokens(300)
+            .build(),
+        )
+        .await
+        .map_err(TutorError::Provider)?
+        .content;
+        let response: MistakeResponse = serde_json::from_str(&text).map_err(TutorError::InvalidMistakes)?;
         Ok(response.mistakes)
-    }
-
-    fn text_generator(&self, model: TextModel) -> &Arc<dyn TextGenerator> {
-        if model.is_openai() {
-            &self.openai_text
-        } else {
-            &self.google_text
-        }
     }
 }
 
-#[derive(Deserialize)]
+impl Default for KoreanTutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct MistakeResponse {
+    #[schemars(length(max = 2))]
     mistakes: Vec<KoreanTutorMistake>,
 }
 
-fn mistake_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "mistakes": {
-                "type": "array",
-                "maxItems": 2,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "kind": {"type": "string", "enum": ["grammar", "vocabulary", "politeness", "naturalness"]},
-                        "original": {"type": "string"},
-                        "correction": {"type": "string"},
-                        "explanation": {"type": "string"}
-                    },
-                    "required": ["kind", "original", "correction", "explanation"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        "required": ["mistakes"],
-        "additionalProperties": false
-    })
-}
-
 fn response_prompt(
-    conversation: &[ConversationMessage],
-    transcription: &str,
-    mistakes: &[KoreanTutorMistake],
+    conversation: &[ConversationMessage], transcription: &str, mistakes: &[KoreanTutorMistake],
 ) -> String {
     let mut output = String::new();
     if !mistakes.is_empty() {
@@ -380,7 +308,7 @@ Identify clear grammar, vocabulary, politeness, or naturalness errors. Do not fl
 #[derive(Debug, Error)]
 pub enum TutorError {
     #[error("language model request failed: {0}")]
-    Provider(#[source] Box<dyn std::error::Error + Send + Sync>),
+    Provider(#[source] llm::ClientError),
     #[error("mistake detection returned invalid JSON: {0}")]
     InvalidMistakes(#[source] serde_json::Error),
     #[error("the tutor returned an empty response")]
@@ -394,8 +322,11 @@ mod tests {
     #[test]
     fn default_models_match_the_reliable_profile() {
         let models = ModelConfiguration::default();
-        assert_eq!(models.reply.as_str(), "gemini-3.1-flash-lite");
-        assert_eq!(models.transcription.as_str(), "gpt-4o-mini-transcribe");
+        assert_eq!(ModelId::from(models.reply).as_str(), "gemini-3.1-flash-lite");
+        assert_eq!(
+            TranscriptionModelId::from(models.transcription).as_str(),
+            "gpt-4o-mini-transcribe"
+        );
     }
 
     #[test]

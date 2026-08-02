@@ -7,7 +7,9 @@ use crate::async_trait;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Backend {
+    Gemini,
     Llama,
+    OpenAi,
 }
 
 /// A language model supported by this crate.
@@ -30,6 +32,15 @@ pub(crate) enum Backend {
 )]
 #[strum(parse_err_ty = ParseModelIdError, parse_err_fn = ParseModelIdError::new)]
 pub enum ModelId {
+    #[strum(serialize = "gemini-3.1-flash-lite")]
+    #[serde(rename = "gemini-3.1-flash-lite")]
+    Gemini31FlashLite,
+    #[strum(serialize = "gemini-3.5-flash")]
+    #[serde(rename = "gemini-3.5-flash")]
+    Gemini35Flash,
+    #[strum(serialize = "gpt-5.5")]
+    #[serde(rename = "gpt-5.5")]
+    Gpt55,
     GEMMA_4_E2B_Q4,
     GEMMA_4_E4B_Q4,
     GEMMA_4_12B_Q4,
@@ -48,6 +59,8 @@ impl ModelId {
 
     pub(crate) const fn backend(self) -> Backend {
         match self {
+            Self::Gemini31FlashLite | Self::Gemini35Flash => Backend::Gemini,
+            Self::Gpt55 => Backend::OpenAi,
             Self::GEMMA_4_E2B_Q4
             | Self::GEMMA_4_E4B_Q4
             | Self::GEMMA_4_12B_Q4
@@ -226,6 +239,9 @@ mod tests {
     #[test]
     fn every_supported_model_round_trips() {
         let wire_names = [
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash",
+            "gpt-5.5",
             "GEMMA_4_E2B_Q4",
             "GEMMA_4_E4B_Q4",
             "GEMMA_4_12B_Q4",
