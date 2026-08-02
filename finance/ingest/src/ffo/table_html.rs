@@ -53,6 +53,7 @@ fn clean_once(table_html: &str) -> Result<String> {
     validate(&document)?;
 
     remove_visually_empty_rows(&mut document);
+    attach_accounting_tokens(&mut document);
     remove_fully_empty_columns(&mut document);
     let before = semantic_projection(&document)?;
 
@@ -419,6 +420,133 @@ fn remove_visually_empty_rows(document: &mut Html) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum AccountingAttachment {
+    PrefixDollar,
+    SuffixClosingParenthesis,
+}
+
+struct AccountingTokenMove {
+    source: NodeId,
+    target: NodeId,
+    attachment: AccountingAttachment,
+}
+
+fn attach_accounting_tokens(document: &mut Html) {
+    let row_selector = Selector::parse("tr").expect("valid row selector");
+    let moves = only_table(document)
+        .expect("validated HTML has one table")
+        .select(&row_selector)
+        .flat_map(|row| {
+            let cells = row
+                .children()
+                .filter_map(ElementRef::wrap)
+                .filter(|cell| matches!(cell.value().name(), "td" | "th"))
+                .collect::<Vec<_>>();
+            let texts = cells
+                .iter()
+                .map(|cell| normalized_visible_text(*cell))
+                .collect::<Vec<_>>();
+            let mut moves = Vec::new();
+
+            for (index, text) in texts.iter().enumerate() {
+                let (attachment, target) = match text.as_str() {
+                    "$" => (
+                        AccountingAttachment::PrefixDollar,
+                        ((index + 1)..cells.len()).find(|next| !texts[*next].is_empty()),
+                    ),
+                    ")" => (
+                        AccountingAttachment::SuffixClosingParenthesis,
+                        (0..index)
+                            .rev()
+                            .find(|previous| !texts[*previous].is_empty()),
+                    ),
+                    _ => continue,
+                };
+                let Some(target) = target else {
+                    continue;
+                };
+                moves.push(AccountingTokenMove {
+                    source: cells[index].id(),
+                    target: cells[target].id(),
+                    attachment,
+                });
+            }
+            moves
+        })
+        .collect::<Vec<_>>();
+
+    for token_move in moves {
+        let text_id = match token_move.attachment {
+            AccountingAttachment::PrefixDollar => {
+                first_meaningful_text_id(document, token_move.target)
+            }
+            AccountingAttachment::SuffixClosingParenthesis => {
+                last_meaningful_text_id(document, token_move.target)
+            }
+        };
+        let Some(text_id) = text_id else {
+            continue;
+        };
+
+        let mut text_node = document
+            .tree
+            .get_mut(text_id)
+            .expect("target text remains in tree");
+        let Node::Text(text) = text_node.value() else {
+            unreachable!("accounting token targets are text nodes");
+        };
+        text.text = match token_move.attachment {
+            AccountingAttachment::PrefixDollar => format!("${}", text.trim_start()).into(),
+            AccountingAttachment::SuffixClosingParenthesis => {
+                format!("{})", text.trim_end()).into()
+            }
+        };
+
+        let child_ids = document
+            .tree
+            .get(token_move.source)
+            .expect("accounting token source remains in tree")
+            .children()
+            .map(|child| child.id())
+            .collect::<Vec<_>>();
+        for child_id in child_ids {
+            document
+                .tree
+                .get_mut(child_id)
+                .expect("accounting token source child remains in tree")
+                .detach();
+        }
+    }
+}
+
+fn normalized_visible_text(cell: ElementRef<'_>) -> String {
+    cell.text().collect::<String>().trim().to_owned()
+}
+
+fn first_meaningful_text_id(document: &Html, cell_id: NodeId) -> Option<NodeId> {
+    document.tree.get(cell_id)?.descendants().find_map(|node| {
+        node.value()
+            .as_text()
+            .filter(|text| !text.trim().is_empty())
+            .map(|_| node.id())
+    })
+}
+
+fn last_meaningful_text_id(document: &Html, cell_id: NodeId) -> Option<NodeId> {
+    document
+        .tree
+        .get(cell_id)?
+        .descendants()
+        .filter_map(|node| {
+            node.value()
+                .as_text()
+                .filter(|text| !text.trim().is_empty())
+                .map(|_| node.id())
+        })
+        .last()
+}
+
 #[derive(Debug)]
 struct GridCell {
     id: NodeId,
@@ -750,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_cell_whitespace_and_preserves_accounting_columns() {
+    fn attaches_accounting_tokens_before_removing_their_columns() {
         let input = "<table><tr><td>$</td><td> (79,104</td><td>)</td><td><font>&nbsp;</font></td></tr></table>";
 
         assert_eq!(
@@ -759,9 +887,78 @@ mod tests {
                 "<table>\n",
                 "  <tbody>\n",
                 "    <tr>\n",
+                "      <td>$(79,104)</td>\n",
+                "    </tr>\n",
+                "  </tbody>\n",
+                "</table>"
+            )
+        );
+    }
+
+    #[test]
+    fn attaches_across_empty_cells_without_crossing_rows() {
+        let input = concat!(
+            "<table>",
+            "<tr><td>Amount</td><td>$</td><td></td><td><b>42</b></td></tr>",
+            "<tr><td>Dangling tokens</td><td>)</td><td></td><td>$</td></tr>",
+            "</table>"
+        );
+
+        assert_eq!(
+            clean_table_html(input).unwrap(),
+            concat!(
+                "<table>\n",
+                "  <tbody>\n",
+                "    <tr>\n",
+                "      <td>Amount</td>\n",
+                "      <td><b>$42</b></td>\n",
+                "    </tr>\n",
+                "    <tr>\n",
+                "      <td>Dangling tokens)</td>\n",
                 "      <td>$</td>\n",
-                "      <td> (79,104</td>\n",
-                "      <td>)</td>\n",
+                "    </tr>\n",
+                "  </tbody>\n",
+                "</table>"
+            )
+        );
+    }
+
+    #[test]
+    fn leaves_accounting_characters_embedded_in_text_unchanged() {
+        let input = "<table><tr><td>US$</td><td>$ per share</td><td>42)</td></tr></table>";
+
+        let cleaned = clean_table_html(input).unwrap();
+        assert!(cleaned.contains("<td>US$</td>"));
+        assert!(cleaned.contains("<td>$ per share</td>"));
+        assert!(cleaned.contains("<td>42)</td>"));
+    }
+
+    #[test]
+    fn accounting_token_columns_contract_crossing_spans() {
+        let input = concat!(
+            "<table>",
+            "<tr><td></td><td colspan=\"3\">Year ended</td></tr>",
+            "<tr><td>Net income</td><td>$</td><td>42</td><td></td></tr>",
+            "<tr><td>Net loss</td><td colspan=\"2\">(7</td><td>)</td></tr>",
+            "</table>"
+        );
+
+        assert_eq!(
+            clean_table_html(input).unwrap(),
+            concat!(
+                "<table>\n",
+                "  <tbody>\n",
+                "    <tr>\n",
+                "      <td></td>\n",
+                "      <td>Year ended</td>\n",
+                "    </tr>\n",
+                "    <tr>\n",
+                "      <td>Net income</td>\n",
+                "      <td>$42</td>\n",
+                "    </tr>\n",
+                "    <tr>\n",
+                "      <td>Net loss</td>\n",
+                "      <td>(7)</td>\n",
                 "    </tr>\n",
                 "  </tbody>\n",
                 "</table>"
