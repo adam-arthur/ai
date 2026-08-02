@@ -79,13 +79,13 @@ pub async fn fetch_reit_ffo_data(
             ),
         }
 
-        documents.push(extract::extract_downloaded_document(
-            source,
-            &local_path,
-            content_type,
-            bytes.len(),
-            &bytes,
-        ));
+        // HTML value extraction is intentionally paused while the screenshot-first pipeline is
+        // developed. Keep the source document in the canonicalization input so SEC pulling and
+        // image generation continue unchanged, but do not publish HTML-scraped values.
+        documents.push(ExtractedFfoDocument {
+            document: source,
+            values: Vec::new(),
+        });
     }
 
     Ok(canonical::canonicalize(symbol, &sources.cik, documents))

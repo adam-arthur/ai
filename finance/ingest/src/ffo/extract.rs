@@ -15,6 +15,7 @@ fn normalized_text<'a>(fragments: impl Iterator<Item = &'a str>) -> String {
         .join(" ")
 }
 
+#[allow(dead_code)] // Retained for reuse after the screenshot-first extraction path is ready.
 pub(super) fn extract_downloaded_document(
     document: FfoSourceDocument,
     _local_path: &Path,
