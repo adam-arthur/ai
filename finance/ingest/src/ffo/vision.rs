@@ -36,10 +36,10 @@ struct CandidateScore {
 }
 
 pub(super) async fn ensure_candidate_images(
-    filing_dir: &Path,
+    quarter_dir: &Path,
     sources: Vec<(PathBuf, Option<String>, Vec<u8>)>,
 ) -> Result<usize> {
-    let filing_dir = filing_dir.to_path_buf();
+    let quarter_dir = quarter_dir.to_path_buf();
     let permit = CHROME_LIMIT
         .clone()
         .acquire_owned()
@@ -47,20 +47,17 @@ pub(super) async fn ensure_candidate_images(
         .context("FFO image-generation semaphore closed")?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        generate_candidate_images(&filing_dir, sources)
+        generate_candidate_images(&quarter_dir, sources)
     })
     .await
     .context("FFO image-generation task panicked")?
 }
 
 fn generate_candidate_images(
-    filing_dir: &Path,
+    quarter_dir: &Path,
     sources: Vec<(PathBuf, Option<String>, Vec<u8>)>,
 ) -> Result<usize> {
-    let output_dir = filing_dir.join("vision");
-    if output_dir.exists() {
-        return count_candidate_images(&output_dir);
-    }
+    let output_dir = quarter_dir.join("vision");
 
     let staging_dir = staging_dir(&output_dir)?;
     fs::create_dir(&staging_dir)
@@ -90,8 +87,27 @@ fn generate_candidate_images(
             }
         }
 
-        fs::rename(&staging_dir, &output_dir)
-            .with_context(|| format!("failed to replace {}", output_dir.display()))?;
+        if output_dir.exists() {
+            let entries = fs::read_dir(&staging_dir)
+                .with_context(|| format!("failed to read {}", staging_dir.display()))?
+                .collect::<std::io::Result<Vec<_>>>()?;
+            for entry in &entries {
+                let destination = output_dir.join(entry.file_name());
+                if destination.exists() {
+                    bail!("FFO vision image already exists: {}", destination.display());
+                }
+            }
+            for entry in entries {
+                let destination = output_dir.join(entry.file_name());
+                fs::rename(entry.path(), &destination)
+                    .with_context(|| format!("failed to write {}", destination.display()))?;
+            }
+            fs::remove_dir(&staging_dir)
+                .with_context(|| format!("failed to remove {}", staging_dir.display()))?;
+        } else {
+            fs::rename(&staging_dir, &output_dir)
+                .with_context(|| format!("failed to replace {}", output_dir.display()))?;
+        }
         Ok(image_count)
     })();
 
@@ -123,15 +139,6 @@ fn staging_dir(output_dir: &Path) -> Result<PathBuf> {
         .to_string_lossy();
     let id = STAGING_ID.fetch_add(1, Ordering::Relaxed);
     Ok(parent.join(format!(".{name}.tmp-{}-{id}", std::process::id())))
-}
-
-fn count_candidate_images(output_dir: &Path) -> Result<usize> {
-    fs::read_dir(output_dir)
-        .with_context(|| format!("failed to read {}", output_dir.display()))?
-        .try_fold(0, |count, entry| {
-            let entry = entry?;
-            Ok(count + usize::from(entry.file_type()?.is_file()))
-        })
 }
 
 fn find_candidates(source: &str) -> Vec<Candidate> {
@@ -453,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn vision_directory_marks_a_filing_complete_even_when_empty() {
+    fn vision_directory_accepts_additional_quarter_batches() {
         let test_dir = std::env::temp_dir().join(format!(
             "ffo-vision-test-{}-{}",
             std::process::id(),
