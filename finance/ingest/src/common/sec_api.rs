@@ -6,6 +6,7 @@ use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, de::DeserializeOwned};
 use time::{Date, macros::format_description};
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::{
     financials::models::{Company, QuarterlyData}, meta_utils::YieldWatchError
@@ -13,14 +14,18 @@ use crate::{
 
 use super::HTTP;
 
+const SEC_REQUEST_PERIOD: Duration = Duration::from_nanos(111_111_112);
+const SEC_MAX_IN_FLIGHT: usize = 4;
+
 static SEC_API_RATE_LIMITER: Lazy<DefaultDirectRateLimiter> = Lazy::new(|| {
-    // Stay below the SEC fair-access ceiling of ten requests per second.
+    // Start just under nine requests per second, leaving headroom below the SEC ceiling of ten.
     RateLimiter::direct(
-        Quota::with_period(Duration::from_millis(125))
+        Quota::with_period(SEC_REQUEST_PERIOD)
             .expect("SEC request period must be non-zero")
             .allow_burst(NonZeroU32::new(1).unwrap()),
     )
 });
+static SEC_IN_FLIGHT_LIMITER: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(SEC_MAX_IN_FLIGHT));
 static SEC_USER_AGENT: Lazy<String> = Lazy::new(|| {
     env::var("SEC_USER_AGENT")
         .expect("SEC_USER_AGENT must identify the application and include contact information")
@@ -463,7 +468,7 @@ where
         panic!("Invalid path!")
     }
 
-    SEC_API_RATE_LIMITER.until_ready().await;
+    let _permit = sec_request_permit().await;
 
     let response = HTTP
         .get(format!("{base_url}{path}"))
@@ -477,7 +482,7 @@ where
 
 /// Fetches a text document from SEC.gov using the shared fair-access throttle and user agent.
 pub(crate) async fn fetch_sec_text(url: &str) -> Result<String, YieldWatchError> {
-    SEC_API_RATE_LIMITER.until_ready().await;
+    let _permit = sec_request_permit().await;
 
     Ok(HTTP
         .get(url)
@@ -496,7 +501,7 @@ pub(crate) async fn fetch_sec_text(url: &str) -> Result<String, YieldWatchError>
 pub(crate) async fn fetch_sec_document(
     url: &str,
 ) -> Result<(Vec<u8>, Option<String>), YieldWatchError> {
-    SEC_API_RATE_LIMITER.until_ready().await;
+    let _permit = sec_request_permit().await;
 
     let response = HTTP
         .get(url)
@@ -511,6 +516,15 @@ pub(crate) async fn fetch_sec_document(
         .map(str::to_owned);
 
     Ok((response.bytes().await?.to_vec(), content_type))
+}
+
+async fn sec_request_permit() -> SemaphorePermit<'static> {
+    let permit = SEC_IN_FLIGHT_LIMITER
+        .acquire()
+        .await
+        .expect("SEC in-flight request limiter must remain open");
+    SEC_API_RATE_LIMITER.until_ready().await;
+    permit
 }
 
 #[cfg(test)]
