@@ -5,7 +5,7 @@
 //! the consumer-facing model.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet}, fs, path::{Path, PathBuf}
+    collections::BTreeSet, fs, path::{Path, PathBuf}
 };
 
 use anyhow::{Context, Result};
@@ -28,10 +28,6 @@ use crate::{
     common::sec_api::fetch_sec_document, financials::local_api::read_corporate_actions_from, meta_utils::get_app_data_path
 };
 
-const PROCESSED_FILINGS_FILE: &str = "processed-filings.json";
-
-type FetchedDocument = (FfoSourceDocument, Vec<u8>, Option<String>);
-
 /// Locates likely FFO/AFFO source documents without writing to the persistent source cache.
 #[allow(dead_code)]
 pub async fn fetch_reit_ffo_sources(cik: &str) -> Result<ReitFfoSources> {
@@ -52,118 +48,100 @@ pub async fn fetch_reit_ffo_sources_batch(
 
 /// Discovers and downloads an issuer's recent FFO/AFFO source documents.
 ///
-/// Raw documents are archived in flat calendar-quarter directories such as
-/// `sources_dir/<symbol>/2025-q4/<document-name>`. The calendar quarter comes from the SEC report
-/// date when present and otherwise from the filing date. Processed SEC accessions, including
-/// filings determined not to contain FFO material, are recorded in `processed-filings.json`.
+/// Raw documents are archived byte-for-byte under
+/// `data_dir/sec/filings/<symbol>/<filing-year>/<accession>/<SEC-filename>`. Derived candidate
+/// tables live separately under `data_dir/ffo/derived`. Documents examined and found not to
+/// contain FFO material are listed by `<accession>/<SEC-filename>` in a year-sharded JSON array.
 #[allow(dead_code)]
 pub async fn fetch_reit_ffo_data(
     symbol: &str,
     cik: &str,
     name_changes: Vec<FfoNameChange>,
-    sources_dir: impl AsRef<Path>,
+    data_dir: impl AsRef<Path>,
 ) -> Result<ReitFfoData> {
-    let issuer_dir = issuer_source_dir(sources_dir.as_ref(), symbol);
-    fs::create_dir_all(&issuer_dir)
-        .with_context(|| format!("failed to create {}", issuer_dir.display()))?;
-    let processed_path = issuer_dir.join(PROCESSED_FILINGS_FILE);
-    let mut processed_accessions = read_processed_accessions(&processed_path)?;
-    let filings = discovery::discover_reit_ffo_filings(cik, &processed_accessions).await?;
-
-    let mut quarters = BTreeMap::<String, (Vec<FetchedDocument>, BTreeSet<String>)>::new();
+    let data_dir = data_dir.as_ref();
+    let filings = discovery::discover_reit_ffo_filings(cik).await?;
     let mut documents = Vec::new();
     for filing in filings {
         let accession = filing.filing.accession_number.clone();
+        let filing_year = filing_year(&filing.filing)?;
+        let raw_dir = raw_filing_dir(data_dir, symbol, &filing_year, &accession);
+        let skip_path = skipped_files_path(data_dir, symbol, &filing_year);
+        let mut skipped_files = read_skipped_files(&skip_path)?;
         let mut fetched_documents = Vec::new();
         for source in filing.documents {
-            let (bytes, content_type) = fetch_sec_document(&source.url)
-                .await
-                .with_context(|| format!("failed to download {}", source.url))?;
-            if bytes.is_empty() {
-                anyhow::bail!("SEC returned an empty source document for {}", source.url);
+            let file_name = source_file_name(&source.url);
+            let skip_key = skipped_file_key(&accession, &file_name);
+            if skipped_files.contains(&skip_key) {
+                continue;
             }
-            if document_mentions_ffo(&source, &bytes, content_type.as_deref()) {
-                fetched_documents.push((source, bytes, content_type));
-            }
+
+            let raw_path = raw_dir.join(&file_name);
+            let (bytes, content_type) = if raw_path.is_file() {
+                (
+                    fs::read(&raw_path)
+                        .with_context(|| format!("failed to read {}", raw_path.display()))?,
+                    None,
+                )
+            } else {
+                let (bytes, content_type) = fetch_sec_document(&source.url)
+                    .await
+                    .with_context(|| format!("failed to download {}", source.url))?;
+                if bytes.is_empty() {
+                    anyhow::bail!("SEC returned an empty source document for {}", source.url);
+                }
+                if !document_mentions_ffo(&source, &bytes, content_type.as_deref()) {
+                    skipped_files.insert(skip_key);
+                    write_skipped_files(&skip_path, &skipped_files)?;
+                    continue;
+                }
+                fs::create_dir_all(&raw_dir)
+                    .with_context(|| format!("failed to create {}", raw_dir.display()))?;
+                write_bytes_atomic(&raw_path, &bytes)?;
+                (bytes, content_type)
+            };
+
+            fetched_documents.push((source, bytes, content_type));
         }
 
         if fetched_documents.is_empty() {
-            mark_accession_processed(&processed_path, &mut processed_accessions, accession)?;
             continue;
         }
 
-        let quarter = filing_calendar_quarter(&filing.filing)?;
-        let (quarter_documents, accessions) = quarters.entry(quarter).or_default();
-        quarter_documents.extend(fetched_documents);
-        accessions.insert(accession);
-    }
-
-    for (quarter, (quarter_documents, accessions)) in quarters {
-        let document_dir = issuer_dir.join(&quarter);
-        let quarter_existed = document_dir.exists();
-        fs::create_dir_all(&document_dir)
-            .with_context(|| format!("failed to create {}", document_dir.display()))?;
-        let local_names = resolved_source_file_names(&quarter_documents);
-        for local_name in &local_names {
-            let local_path = document_dir.join(local_name);
-            assert!(
-                !local_path.exists(),
-                "FFO source filename already exists: {}",
-                local_path.display()
+        let report_period = filing_calendar_quarter(&filing.filing)?;
+        let derived_dir = derived_filing_dir(data_dir, symbol, &report_period, &accession);
+        if !derived_dir.join("tables").is_dir() {
+            fs::create_dir_all(&derived_dir)
+                .with_context(|| format!("failed to create {}", derived_dir.display()))?;
+            let candidate_sources = fetched_documents
+                .iter()
+                .map(|(source, bytes, content_type)| {
+                    (
+                        raw_dir.join(source_file_name(&source.url)),
+                        content_type.clone(),
+                        bytes.clone(),
+                    )
+                })
+                .collect();
+            let table_count =
+                candidate_tables::ensure_candidate_tables(&derived_dir, candidate_sources)
+                    .with_context(|| {
+                        format!("FFO table extraction failed for {}", derived_dir.display())
+                    })?;
+            log::debug!(
+                "FFO - cached {table_count} candidate table(s) in {}",
+                derived_dir.join("tables").display()
             );
         }
 
-        let mut candidate_sources = Vec::new();
-        let mut written_paths = Vec::new();
-        for ((source, bytes, content_type), local_name) in
-            quarter_documents.into_iter().zip(local_names)
-        {
-            let local_path = document_dir.join(local_name);
-            write_bytes_atomic(&local_path, &bytes)?;
-            written_paths.push(local_path.clone());
-            candidate_sources.push((local_path, content_type, bytes));
-
-            // Value extraction will be supplied by the future LLM pipeline. Keep the source
-            // document in the canonicalization input so SEC pulling and candidate table
-            // generation continue unchanged, but do not publish inferred values yet.
-            documents.push(ExtractedFfoDocument {
+        // Value extraction will be supplied by the future LLM pipeline. Keep each relevant SEC
+        // document in canonicalization input, but do not publish inferred values yet.
+        documents.extend(fetched_documents.into_iter().map(|(source, _, _)| {
+            ExtractedFfoDocument {
                 document: source,
                 values: Vec::new(),
-            });
-        }
-
-        let table_count = match candidate_tables::ensure_candidate_tables(
-            &document_dir,
-            candidate_sources,
-        ) {
-            Ok(count) => count,
-            Err(error) => {
-                if quarter_existed {
-                    for path in written_paths {
-                        fs::remove_file(&path)
-                            .with_context(|| format!("failed to remove {}", path.display()))?;
-                    }
-                } else {
-                    fs::remove_dir_all(&document_dir).with_context(|| {
-                        format!(
-                            "FFO table extraction failed and incomplete quarter directory could not be removed: {}",
-                            document_dir.display()
-                        )
-                    })?;
-                }
-                return Err(error).with_context(|| {
-                    format!("FFO table extraction failed for {}", document_dir.display())
-                });
             }
-        };
-        log::debug!(
-            "FFO - cached {table_count} candidate table(s) in {}",
-            document_dir.join("tables").display()
-        );
-        for accession in accessions {
-            processed_accessions.insert(accession);
-        }
-        write_json_atomic(&processed_path, &processed_accessions)?;
+        }));
     }
 
     Ok(canonical::canonicalize(
@@ -174,20 +152,14 @@ pub async fn fetch_reit_ffo_data(
     ))
 }
 
-/// Uses the repository's persistent source cache (`data/ffo/sources` in the default setup).
+/// Uses the repository data directory for immutable SEC filings and derived FFO artifacts.
 #[allow(dead_code)]
 pub async fn fetch_reit_ffo_data_to_cache(
     symbol: &str,
     cik: &str,
     name_changes: Vec<FfoNameChange>,
 ) -> Result<ReitFfoData> {
-    fetch_reit_ffo_data(
-        symbol,
-        cik,
-        name_changes,
-        get_app_data_path().join("ffo").join("sources"),
-    )
-    .await
+    fetch_reit_ffo_data(symbol, cik, name_changes, get_app_data_path()).await
 }
 
 /// Sequential batch variant that honors the SEC fair-access request rate and caller issuer order.
@@ -205,11 +177,38 @@ pub async fn fetch_reit_ffo_data_batch_to_cache(
     Ok(results)
 }
 
-fn issuer_source_dir(sources_dir: &Path, symbol: &str) -> PathBuf {
-    sources_dir.join(symbol)
+fn raw_filing_dir(data_dir: &Path, symbol: &str, filing_year: &str, accession: &str) -> PathBuf {
+    data_dir
+        .join("sec")
+        .join("filings")
+        .join(symbol)
+        .join(filing_year)
+        .join(accession)
 }
 
-fn read_processed_accessions(path: &Path) -> Result<BTreeSet<String>> {
+fn skipped_files_path(data_dir: &Path, symbol: &str, filing_year: &str) -> PathBuf {
+    data_dir
+        .join("sec")
+        .join("cache")
+        .join(symbol)
+        .join(format!("{filing_year}.json"))
+}
+
+fn derived_filing_dir(
+    data_dir: &Path,
+    symbol: &str,
+    report_period: &str,
+    accession: &str,
+) -> PathBuf {
+    data_dir
+        .join("ffo")
+        .join("derived")
+        .join(symbol)
+        .join(report_period)
+        .join(accession)
+}
+
+fn read_skipped_files(path: &Path) -> Result<BTreeSet<String>> {
     if !path.is_file() {
         return Ok(BTreeSet::new());
     }
@@ -217,13 +216,27 @@ fn read_processed_accessions(path: &Path) -> Result<BTreeSet<String>> {
     serde_json::from_slice(&bytes).with_context(|| format!("failed to parse {}", path.display()))
 }
 
-fn mark_accession_processed(
-    path: &Path,
-    processed_accessions: &mut BTreeSet<String>,
-    accession: String,
-) -> Result<()> {
-    processed_accessions.insert(accession);
-    write_json_atomic(path, processed_accessions)
+fn write_skipped_files(path: &Path, skipped_files: &BTreeSet<String>) -> Result<()> {
+    let parent = path.parent().context("SEC skip-list path has no parent")?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    write_json_atomic(path, skipped_files)
+}
+
+fn skipped_file_key(accession: &str, file_name: &str) -> String {
+    format!("{accession}/{file_name}")
+}
+
+fn filing_year(filing: &crate::common::sec_api::SecFiling) -> Result<String> {
+    let year = filing
+        .filing_date
+        .get(..4)
+        .filter(|year| year.len() == 4 && year.chars().all(|character| character.is_ascii_digit()));
+    year.map(str::to_owned).with_context(|| {
+        format!(
+            "SEC filing {} has an invalid filing date: {}",
+            filing.accession_number, filing.filing_date
+        )
+    })
 }
 
 fn document_mentions_ffo(
@@ -277,83 +290,6 @@ fn calendar_quarter(date: &str) -> Option<String> {
     Some(format!("{year}-q{quarter}"))
 }
 
-fn resolved_source_file_names(documents: &[FetchedDocument]) -> Vec<String> {
-    let original_names = documents
-        .iter()
-        .map(|(source, _, _)| source_file_name(&source.url))
-        .collect::<Vec<_>>();
-    let original_counts = case_insensitive_counts(&original_names);
-    let tentative_names = documents
-        .iter()
-        .zip(&original_names)
-        .map(|((source, _, _), original_name)| {
-            if original_counts[&original_name.to_ascii_lowercase()] > 1 {
-                format!("{}-{original_name}", source.filing_date)
-            } else {
-                original_name.clone()
-            }
-        })
-        .collect::<Vec<_>>();
-    let tentative_counts = case_insensitive_counts(&tentative_names);
-    let reserved = tentative_names
-        .iter()
-        .filter(|name| tentative_counts[&name.to_ascii_lowercase()] == 1)
-        .map(|name| name.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
-    let mut collision_groups = BTreeMap::<String, Vec<usize>>::new();
-    for (index, name) in tentative_names.iter().enumerate() {
-        if tentative_counts[&name.to_ascii_lowercase()] > 1 {
-            collision_groups
-                .entry(name.to_ascii_lowercase())
-                .or_default()
-                .push(index);
-        }
-    }
-
-    let mut resolved = tentative_names.clone();
-    let mut used = reserved.clone();
-    for indices in collision_groups.values_mut() {
-        indices.sort_by(|left, right| {
-            let left = &documents[*left].0;
-            let right = &documents[*right].0;
-            left.accession_number
-                .cmp(&right.accession_number)
-                .then_with(|| left.url.cmp(&right.url))
-        });
-        let mut suffix = 1;
-        for index in indices {
-            loop {
-                let candidate = source_name_with_suffix(&tentative_names[*index], suffix);
-                suffix += 1;
-                if used.insert(candidate.to_ascii_lowercase()) {
-                    resolved[*index] = candidate;
-                    break;
-                }
-            }
-        }
-    }
-    resolved
-}
-
-fn case_insensitive_counts(names: &[String]) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
-    for name in names {
-        *counts.entry(name.to_ascii_lowercase()).or_insert(0) += 1;
-    }
-    counts
-}
-
-fn source_name_with_suffix(name: &str, suffix: usize) -> String {
-    let path = Path::new(name);
-    match (
-        path.file_stem().and_then(|value| value.to_str()),
-        path.extension().and_then(|value| value.to_str()),
-    ) {
-        (Some(stem), Some(extension)) => format!("{stem}-{suffix}.{extension}"),
-        _ => format!("{name}-{suffix}"),
-    }
-}
-
 pub(super) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let file_name = path
         .file_name()
@@ -374,26 +310,7 @@ pub(super) fn source_file_name(url: &str) -> String {
         .ok()
         .and_then(|url| url.path_segments()?.next_back().map(str::to_owned))
         .filter(|name| !name.is_empty())
-        .map(|name| sanitize_path_component(&name))
         .unwrap_or_else(|| "document".to_owned())
-}
-
-pub(super) fn sanitize_path_component(value: &str) -> String {
-    let sanitized = value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    if sanitized.is_empty() {
-        "document".to_owned()
-    } else {
-        sanitized
-    }
 }
 
 #[cfg(test)]
@@ -584,102 +501,50 @@ mod tests {
     }
 
     #[test]
-    fn processed_filings_serialize_as_a_plain_sorted_array() {
-        let processed = BTreeSet::from([
-            "0001500217-26-000029".to_owned(),
-            "0001500217-26-000004".to_owned(),
+    fn skipped_files_serialize_as_a_plain_sorted_array() {
+        let skipped = BTreeSet::from([
+            "0001500217-26-000029/results.htm".to_owned(),
+            "0001500217-26-000004/exhibit99.htm".to_owned(),
         ]);
 
         assert_eq!(
-            serde_json::to_value(processed).unwrap(),
-            serde_json::json!(["0001500217-26-000004", "0001500217-26-000029"])
-        );
-    }
-
-    fn make_source(url: &str, filing_date: &str, accession_number: &str) -> FetchedDocument {
-        (
-            FfoSourceDocument {
-                url: url.to_owned(),
-                exhibit_type: "EX-99.1".to_owned(),
-                description: "Earnings release".to_owned(),
-                filing_date: filing_date.to_owned(),
-                accession_number: accession_number.to_owned(),
-                filing_form: "8-K".to_owned(),
-                filing_index_url: "https://www.sec.gov/index.html".to_owned(),
-            },
-            Vec::new(),
-            None,
-        )
-    }
-
-    #[test]
-    fn prefixes_both_case_insensitive_filename_collisions_with_filing_dates() {
-        let documents = vec![
-            make_source(
-                "https://www.sec.gov/a/Results.htm",
-                "2026-02-03",
-                "0000123-26-000001",
-            ),
-            make_source(
-                "https://www.sec.gov/b/results.htm",
-                "2026-02-04",
-                "0000123-26-000002",
-            ),
-        ];
-
-        assert_eq!(
-            resolved_source_file_names(&documents),
-            ["2026-02-03-Results.htm", "2026-02-04-results.htm"]
+            serde_json::to_value(skipped).unwrap(),
+            serde_json::json!([
+                "0001500217-26-000004/exhibit99.htm",
+                "0001500217-26-000029/results.htm"
+            ])
         );
     }
 
     #[test]
-    fn adds_numeric_suffixes_after_same_date_collisions() {
-        let documents = vec![
-            make_source(
-                "https://www.sec.gov/a/results.htm",
-                "2026-02-03",
-                "0000123-26-000001",
-            ),
-            make_source(
-                "https://www.sec.gov/b/results.htm",
-                "2026-02-03",
-                "0000123-26-000002",
-            ),
-        ];
+    fn separates_raw_sec_filings_skip_lists_and_ffo_derivations() {
+        let data_dir = Path::new("data");
+        let accession = "0000123-26-000001";
 
         assert_eq!(
-            resolved_source_file_names(&documents),
-            ["2026-02-03-results-1.htm", "2026-02-03-results-2.htm"]
+            raw_filing_dir(data_dir, "VICI", "2026", accession),
+            Path::new("data/sec/filings/VICI/2026/0000123-26-000001")
+        );
+        assert_eq!(
+            skipped_files_path(data_dir, "VICI", "2026"),
+            Path::new("data/sec/cache/VICI/2026.json")
+        );
+        assert_eq!(
+            derived_filing_dir(data_dir, "VICI", "2025-q4", accession),
+            Path::new("data/ffo/derived/VICI/2025-q4/0000123-26-000001")
+        );
+        assert_eq!(
+            skipped_file_key(accession, "earnings.htm"),
+            "0000123-26-000001/earnings.htm"
         );
     }
 
     #[test]
-    fn leaves_unique_source_names_unchanged() {
-        let documents = vec![
-            make_source(
-                "https://www.sec.gov/results.htm",
-                "2026-02-03",
-                "0000123-26-000001",
-            ),
-            make_source(
-                "https://www.sec.gov/results.pdf",
-                "2026-02-03",
-                "0000123-26-000001",
-            ),
-        ];
+    fn uses_filing_date_year_for_raw_sec_storage() {
+        let mut filing = filing("8-K", &["2.02"], "form8-k.htm");
+        filing.filing_date = "2026-02-03".to_owned();
+        filing.report_date = Some("2025-12-31".to_owned());
 
-        assert_eq!(
-            resolved_source_file_names(&documents),
-            ["results.htm", "results.pdf"]
-        );
-    }
-
-    #[test]
-    fn symbol_keys_the_sec_source_directory() {
-        assert_eq!(
-            issuer_source_dir(Path::new("data/ffo/sources"), "VICI"),
-            Path::new("data/ffo/sources/VICI")
-        );
+        assert_eq!(filing_year(&filing).unwrap(), "2026");
     }
 }

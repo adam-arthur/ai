@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use reqwest::Url;
@@ -25,7 +25,7 @@ pub(super) struct FilingIndexDocument {
 }
 
 pub(super) async fn discover_reit_ffo_sources(cik: &str) -> Result<ReitFfoSources> {
-    let filings = discover_reit_ffo_filings(cik, &BTreeSet::new()).await?;
+    let filings = discover_reit_ffo_filings(cik).await?;
     Ok(ReitFfoSources {
         cik: cik.trim_start_matches('0').to_owned(),
         documents: filings
@@ -35,10 +35,7 @@ pub(super) async fn discover_reit_ffo_sources(cik: &str) -> Result<ReitFfoSource
     })
 }
 
-pub(super) async fn discover_reit_ffo_filings(
-    cik: &str,
-    processed_accessions: &BTreeSet<String>,
-) -> Result<Vec<DiscoveredFiling>> {
+pub(super) async fn discover_reit_ffo_filings(cik: &str) -> Result<Vec<DiscoveredFiling>> {
     let mut filings = fetch_recent_filings(cik).await?;
     filings.retain(is_within_data_fetch_period);
     filings.sort_by(|left, right| {
@@ -51,10 +48,6 @@ pub(super) async fn discover_reit_ffo_filings(
     let mut discovered = Vec::new();
     let mut seen_urls = HashSet::new();
     for filing in filings {
-        if processed_accessions.contains(&filing.accession_number) {
-            continue;
-        }
-
         let filing_documents = fetch_filing_index(&filing).await?;
         let mut documents = Vec::new();
         for document in filing_documents
