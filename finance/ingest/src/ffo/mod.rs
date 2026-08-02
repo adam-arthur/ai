@@ -226,15 +226,18 @@ fn semantic_filing_name(
     documents: &[(FfoSourceDocument, Vec<u8>, Option<String>)],
 ) -> String {
     let form = filing.form.strip_suffix("/A").unwrap_or(&filing.form);
-    let period = documents
-        .iter()
-        .find_map(|(source, _, _)| period_from_document_name(&source.url))
-        .or_else(|| {
-            matches!(form, "10-Q" | "10-K")
-                .then(|| filing.report_date.as_deref().and_then(calendar_quarter))
-                .flatten()
-        })
-        .unwrap_or_else(|| filing.filing_date.clone());
+    let period = if matches!(form, "10-Q" | "10-K") {
+        filing
+            .report_date
+            .as_deref()
+            .and_then(calendar_quarter)
+            .unwrap_or_else(|| filing.filing_date.clone())
+    } else {
+        filing
+            .report_date
+            .clone()
+            .unwrap_or_else(|| filing.filing_date.clone())
+    };
     let document_metadata = documents
         .iter()
         .map(|(source, _, _)| format!("{} {}", source.description, source.url))
@@ -261,44 +264,6 @@ fn semantic_filing_name(
                     .contains("amended and restated")
             }));
     format!("{period}-{kind}{}", if amended { "-amendment" } else { "" })
-}
-
-fn period_from_document_name(url: &str) -> Option<String> {
-    let name = source_file_name(url).to_ascii_lowercase();
-    let bytes = name.as_bytes();
-    for index in 0..bytes.len() {
-        if bytes[index] != b'q' {
-            continue;
-        }
-        if index >= 1
-            && index + 2 < bytes.len()
-            && matches!(bytes[index - 1], b'1'..=b'4')
-            && let Some(year) = parse_short_year(&bytes[index + 1..])
-        {
-            return Some(format!("{year}-q{}", bytes[index - 1] as char));
-        }
-        if index + 1 < bytes.len() && matches!(bytes[index + 1], b'1'..=b'4') {
-            let quarter = bytes[index + 1] as char;
-            if index >= 4 && bytes[index - 4..index].iter().all(u8::is_ascii_digit) {
-                let year = std::str::from_utf8(&bytes[index - 4..index]).ok()?;
-                return Some(format!("{year}-q{quarter}"));
-            }
-            if let Some(year) = parse_short_year(&bytes[index + 2..]) {
-                return Some(format!("{year}-q{quarter}"));
-            }
-        }
-    }
-    None
-}
-
-fn parse_short_year(bytes: &[u8]) -> Option<u16> {
-    if bytes.len() >= 4 && bytes[..4].iter().all(u8::is_ascii_digit) {
-        return std::str::from_utf8(&bytes[..4]).ok()?.parse().ok();
-    }
-    if bytes.len() >= 2 && bytes[..2].iter().all(u8::is_ascii_digit) {
-        return Some(2000 + std::str::from_utf8(&bytes[..2]).ok()?.parse::<u16>().ok()?);
-    }
-    None
 }
 
 fn calendar_quarter(date: &str) -> Option<String> {
@@ -563,23 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn derives_semantic_reporting_periods_from_sec_document_names() {
-        assert_eq!(
-            period_from_document_name("https://www.sec.gov/a4q25earningsrelease.htm").as_deref(),
-            Some("2025-q4")
-        );
-        assert_eq!(
-            period_from_document_name("https://www.sec.gov/q12026-results.htm").as_deref(),
-            Some("2026-q1")
-        );
-        assert_eq!(
-            period_from_document_name("https://www.sec.gov/2026q2-results.htm").as_deref(),
-            Some("2026-q2")
-        );
-    }
-
-    #[test]
-    fn distinguishes_results_and_periodic_report_directories() {
+    fn uses_sec_dates_for_results_and_periodic_report_directories() {
         let mut eight_k = filing("8-K", &["2.02"], "form8-k.htm");
         eight_k.filing_date = "2026-02-03".to_owned();
         eight_k.report_date = Some("2026-02-03".to_owned());
@@ -596,22 +545,18 @@ mod tests {
 
         assert_eq!(
             semantic_filing_name(&eight_k, &documents),
-            "2025-q4-results"
+            "2026-02-03-results"
         );
 
-        let ten_k = filing("10-K", &[], "annual.htm");
+        let mut ten_k = filing("10-K", &[], "annual.htm");
+        ten_k.report_date = Some("2025-12-31".to_owned());
         assert_eq!(semantic_filing_name(&ten_k, &documents), "2025-q4-10-k");
 
-        let generic_source = FfoSourceDocument {
-            url: "https://www.sec.gov/collections-update.htm".to_owned(),
-            ..documents[0].0.clone()
-        };
+        eight_k.report_date = None;
+        eight_k.filing_date = "2026-02-04".to_owned();
         assert_eq!(
-            semantic_filing_name(
-                &eight_k,
-                &[(generic_source, b"FFO collections update".to_vec(), None)]
-            ),
-            "2026-02-03-results"
+            semantic_filing_name(&eight_k, &documents),
+            "2026-02-04-results"
         );
     }
 
@@ -635,7 +580,7 @@ mod tests {
 
         assert_eq!(
             semantic_filing_name(&eight_k, &documents),
-            "2025-q4-supplemental-amendment"
+            "2026-03-31-supplemental-amendment"
         );
     }
 
