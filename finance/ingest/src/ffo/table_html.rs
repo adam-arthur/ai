@@ -51,11 +51,13 @@ fn clean_once(table_html: &str) -> Result<String> {
     validate(&document)?;
     let before = semantic_projection(&document)?;
 
+    normalize_nonbreaking_spaces(&mut document);
     remove_presentational_attributes(&mut document);
     unwrap_fonts(&mut document);
+    empty_whitespace_only_cells(&mut document);
     remove_structural_whitespace(&mut document);
 
-    let cleaned = only_table(&document)?.html();
+    let cleaned = pretty_table_html(&document)?;
     let reparsed = Html::parse_fragment(&cleaned);
     validate(&reparsed)?;
     let after = semantic_projection(&reparsed)?;
@@ -63,6 +65,177 @@ fn clean_once(table_html: &str) -> Result<String> {
         bail!("table HTML cleanup changed table structure or semantic content");
     }
     Ok(cleaned)
+}
+
+fn normalize_nonbreaking_spaces(document: &mut Html) {
+    let text_ids = document
+        .tree
+        .nodes()
+        .filter(|node| {
+            node.value()
+                .as_text()
+                .is_some_and(|text| text.contains('\u{a0}'))
+        })
+        .map(|node| node.id())
+        .collect::<Vec<_>>();
+
+    for id in text_ids {
+        let mut node = document
+            .tree
+            .get_mut(id)
+            .expect("text node remains in tree");
+        if let Node::Text(text) = node.value() {
+            text.text = text.replace('\u{a0}', " ").into();
+        }
+    }
+}
+
+fn empty_whitespace_only_cells(document: &mut Html) {
+    let whitespace_child_ids = document
+        .tree
+        .nodes()
+        .filter(|node| {
+            node.value()
+                .as_text()
+                .is_some_and(|text| text.trim().is_empty())
+                && node.parent().is_some_and(|parent| {
+                    parent.value().as_element().is_some_and(|element| {
+                        matches!(element.name(), "td" | "th")
+                            && parent.children().all(|child| child.value().is_text())
+                    })
+                })
+        })
+        .map(|node| node.id())
+        .collect::<Vec<_>>();
+
+    for id in whitespace_child_ids {
+        document
+            .tree
+            .get_mut(id)
+            .expect("whitespace node remains in tree")
+            .detach();
+    }
+}
+
+fn pretty_table_html(document: &Html) -> Result<String> {
+    let table = only_table(document)?;
+    let mut output = String::new();
+    write_pretty_node(
+        document
+            .tree
+            .get(table.id())
+            .context("table disappeared from parsed HTML")?,
+        0,
+        &mut output,
+    );
+    Ok(output)
+}
+
+fn write_pretty_node(node: NodeRef<'_, Node>, depth: usize, output: &mut String) {
+    let Node::Element(element) = node.value() else {
+        write_indent(depth, output);
+        write_compact_node(node, output);
+        return;
+    };
+
+    write_indent(depth, output);
+    write_start_tag(element, output);
+    let name = element.name();
+    if matches!(name, "br" | "col") {
+        return;
+    }
+
+    let children = node.children().collect::<Vec<_>>();
+    if children.is_empty() {
+        output.push_str("</");
+        output.push_str(name);
+        output.push('>');
+        return;
+    }
+
+    if STRUCTURAL_ELEMENTS.contains(&name) {
+        for child in children {
+            output.push('\n');
+            if child
+                .value()
+                .as_element()
+                .is_some_and(|child| STRUCTURAL_ELEMENTS.contains(&child.name()))
+            {
+                write_pretty_node(child, depth + 1, output);
+            } else {
+                write_indent(depth + 1, output);
+                write_compact_node(child, output);
+            }
+        }
+        output.push('\n');
+        write_indent(depth, output);
+    } else {
+        for child in children {
+            write_compact_node(child, output);
+        }
+    }
+    output.push_str("</");
+    output.push_str(name);
+    output.push('>');
+}
+
+fn write_compact_node(node: NodeRef<'_, Node>, output: &mut String) {
+    match node.value() {
+        Node::Element(element) => {
+            write_start_tag(element, output);
+            if !matches!(element.name(), "br" | "col") {
+                for child in node.children() {
+                    write_compact_node(child, output);
+                }
+                output.push_str("</");
+                output.push_str(element.name());
+                output.push('>');
+            }
+        }
+        Node::Text(text) => write_escaped(text, output, false),
+        Node::Comment(comment) => {
+            output.push_str("<!--");
+            output.push_str(comment);
+            output.push_str("-->");
+        }
+        Node::Document | Node::Fragment => {
+            for child in node.children() {
+                write_compact_node(child, output);
+            }
+        }
+        Node::Doctype(_) | Node::ProcessingInstruction(_) => {}
+    }
+}
+
+fn write_start_tag(element: &scraper::node::Element, output: &mut String) {
+    output.push('<');
+    output.push_str(element.name());
+    for (name, value) in element.attrs() {
+        output.push(' ');
+        output.push_str(name);
+        output.push_str("=\"");
+        write_escaped(value, output, true);
+        output.push('"');
+    }
+    output.push('>');
+}
+
+fn write_escaped(value: &str, output: &mut String, attribute: bool) {
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' if attribute => output.push_str("&quot;"),
+            _ => output.push(character),
+        }
+    }
+}
+
+fn write_indent(depth: usize, output: &mut String) {
+    for _ in 0..depth {
+        output.push_str("  ");
+    }
 }
 
 fn validate(document: &Html) -> Result<()> {
@@ -206,6 +379,19 @@ fn semantic_projection(document: &Html) -> Result<Vec<SemanticToken>> {
             .context("table disappeared from parsed HTML")?,
         &mut projection,
     );
+    let whitespace_only_cell_text = (1..projection.len().saturating_sub(1))
+        .filter(|&index| {
+            matches!(&projection[index], SemanticToken::Text(text) if text.trim().is_empty())
+                && matches!(
+                    (&projection[index - 1], &projection[index + 1]),
+                    (SemanticToken::Start(start, _), SemanticToken::End(end))
+                        if start == end && matches!(start.as_str(), "td" | "th")
+                )
+        })
+        .collect::<Vec<_>>();
+    for index in whitespace_only_cell_text.into_iter().rev() {
+        projection.remove(index);
+    }
     Ok(projection)
 }
 
@@ -239,10 +425,11 @@ fn project_node(node: NodeRef<'_, Node>, projection: &mut Vec<SemanticToken>) {
             projection.push(SemanticToken::End(name));
         }
         Node::Text(text) => {
+            let normalized = text.replace('\u{a0}', " ");
             if let Some(SemanticToken::Text(previous)) = projection.last_mut() {
-                previous.push_str(text);
+                previous.push_str(&normalized);
             } else {
-                projection.push(SemanticToken::Text(text.to_string()));
+                projection.push(SemanticToken::Text(normalized));
             }
         }
         Node::Comment(comment) => projection.push(SemanticToken::Comment(comment.to_string())),
@@ -271,17 +458,36 @@ mod tests {
 
         assert_eq!(
             clean_table_html(input).unwrap(),
-            "<table><tbody><tr><td colspan=\"2\"><b>FFO</b><br>$&nbsp;42</td></tr></tbody></table>"
+            concat!(
+                "<table>\n",
+                "  <tbody>\n",
+                "    <tr>\n",
+                "      <td colspan=\"2\"><b>FFO</b><br>$ 42</td>\n",
+                "    </tr>\n",
+                "  </tbody>\n",
+                "</table>"
+            )
         );
     }
 
     #[test]
-    fn preserves_cell_whitespace_and_accounting_columns() {
-        let input = "<table><tr><td>$</td><td> (79,104</td><td>)</td><td>&nbsp;</td></tr></table>";
+    fn normalizes_cell_whitespace_and_preserves_accounting_columns() {
+        let input = "<table><tr><td>$</td><td> (79,104</td><td>)</td><td><font>&nbsp;</font></td></tr></table>";
 
         assert_eq!(
             clean_table_html(input).unwrap(),
-            "<table><tbody><tr><td>$</td><td> (79,104</td><td>)</td><td>&nbsp;</td></tr></tbody></table>"
+            concat!(
+                "<table>\n",
+                "  <tbody>\n",
+                "    <tr>\n",
+                "      <td>$</td>\n",
+                "      <td> (79,104</td>\n",
+                "      <td>)</td>\n",
+                "      <td></td>\n",
+                "    </tr>\n",
+                "  </tbody>\n",
+                "</table>"
+            )
         );
     }
 
@@ -291,7 +497,15 @@ mod tests {
 
         assert_eq!(
             clean_table_html(input).unwrap(),
-            "<table><tbody><tr><td>For the year ended</td></tr></tbody></table>"
+            concat!(
+                "<table>\n",
+                "  <tbody>\n",
+                "    <tr>\n",
+                "      <td>For the year ended</td>\n",
+                "    </tr>\n",
+                "  </tbody>\n",
+                "</table>"
+            )
         );
     }
 

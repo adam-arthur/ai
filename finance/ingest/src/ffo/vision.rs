@@ -517,7 +517,16 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(&table_path).unwrap(),
-            "<table><tbody><tr><td>FFO</td><td>(42)</td></tr></tbody></table>"
+            concat!(
+                "<table>\n",
+                "  <tbody>\n",
+                "    <tr>\n",
+                "      <td>FFO</td>\n",
+                "      <td>(42)</td>\n",
+                "    </tr>\n",
+                "  </tbody>\n",
+                "</table>"
+            )
         );
         fs::remove_dir_all(test_dir).unwrap();
     }
