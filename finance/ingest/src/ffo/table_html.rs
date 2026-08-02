@@ -23,8 +23,10 @@ const PRESENTATIONAL_ATTRIBUTES: &[&str] = &[
     "width",
 ];
 
+const NON_DATA_ATTRIBUTES: &[&str] = &["href"];
+
 const PRESERVED_ATTRIBUTES: &[&str] = &[
-    "abbr", "colspan", "dir", "headers", "href", "id", "lang", "rowspan", "scope", "title",
+    "abbr", "colspan", "dir", "headers", "id", "lang", "rowspan", "scope", "title",
 ];
 
 const STRUCTURAL_ELEMENTS: &[&str] = &["table", "colgroup", "thead", "tbody", "tfoot", "tr"];
@@ -52,7 +54,7 @@ fn clean_once(table_html: &str) -> Result<String> {
     let before = semantic_projection(&document)?;
 
     normalize_nonbreaking_spaces(&mut document);
-    remove_presentational_attributes(&mut document);
+    remove_non_data_attributes(&mut document);
     unwrap_fonts(&mut document);
     empty_whitespace_only_cells(&mut document);
     remove_structural_whitespace(&mut document);
@@ -250,6 +252,7 @@ fn validate(document: &Html) -> Result<()> {
         }
         for (attribute, _) in element.attrs() {
             if !PRESENTATIONAL_ATTRIBUTES.contains(&attribute)
+                && !NON_DATA_ATTRIBUTES.contains(&attribute)
                 && !PRESERVED_ATTRIBUTES.contains(&attribute)
             {
                 bail!("unsupported attribute {attribute:?} on <{name}>");
@@ -288,7 +291,7 @@ fn only_table(document: &Html) -> Result<ElementRef<'_>> {
     Ok(table)
 }
 
-fn remove_presentational_attributes(document: &mut Html) {
+fn remove_non_data_attributes(document: &mut Html) {
     let element_ids = document
         .tree
         .nodes()
@@ -299,9 +302,10 @@ fn remove_presentational_attributes(document: &mut Html) {
     for id in element_ids {
         let mut node = document.tree.get_mut(id).expect("node remains in tree");
         if let Node::Element(element) = node.value() {
-            element
-                .attrs
-                .retain(|(name, _)| !PRESENTATIONAL_ATTRIBUTES.contains(&name.local.as_ref()));
+            element.attrs.retain(|(name, _)| {
+                !PRESENTATIONAL_ATTRIBUTES.contains(&name.local.as_ref())
+                    && !NON_DATA_ATTRIBUTES.contains(&name.local.as_ref())
+            });
         }
     }
 }
@@ -406,7 +410,10 @@ fn project_node(node: NodeRef<'_, Node>, projection: &mut Vec<SemanticToken>) {
             let name = element.name().to_owned();
             let mut attributes = element
                 .attrs()
-                .filter(|(attribute, _)| !PRESENTATIONAL_ATTRIBUTES.contains(attribute))
+                .filter(|(attribute, _)| {
+                    !PRESENTATIONAL_ATTRIBUTES.contains(attribute)
+                        && !NON_DATA_ATTRIBUTES.contains(attribute)
+                })
                 .map(|(attribute, value)| (attribute.to_owned(), value.to_owned()))
                 .collect::<Vec<_>>();
             attributes.sort();
@@ -502,6 +509,24 @@ mod tests {
                 "  <tbody>\n",
                 "    <tr>\n",
                 "      <td>For the year ended</td>\n",
+                "    </tr>\n",
+                "  </tbody>\n",
+                "</table>"
+            )
+        );
+    }
+
+    #[test]
+    fn removes_link_destinations_but_preserves_link_text() {
+        let input = r##"<table><tr><td><a href="#details">FFO details</a></td></tr></table>"##;
+
+        assert_eq!(
+            clean_table_html(input).unwrap(),
+            concat!(
+                "<table>\n",
+                "  <tbody>\n",
+                "    <tr>\n",
+                "      <td><a>FFO details</a></td>\n",
                 "    </tr>\n",
                 "  </tbody>\n",
                 "</table>"

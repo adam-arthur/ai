@@ -13,7 +13,6 @@ use reqwest::Url;
 
 mod canonical;
 mod discovery;
-mod extract;
 mod models;
 mod table_html;
 mod vision;
@@ -48,7 +47,7 @@ pub async fn fetch_reit_ffo_sources_batch(
     Ok(results)
 }
 
-/// Discovers, downloads, and extracts an issuer's recent FFO/AFFO source documents.
+/// Discovers and downloads an issuer's recent FFO/AFFO source documents.
 ///
 /// Raw documents are archived in flat calendar-quarter directories such as
 /// `sources_dir/<symbol>/2025-q4/<document-name>`. The calendar quarter comes from the SEC report
@@ -120,9 +119,9 @@ pub async fn fetch_reit_ffo_data(
             written_paths.push(local_path.clone());
             vision_sources.push((local_path, content_type, bytes));
 
-            // HTML value extraction is intentionally paused while the screenshot-first pipeline is
-            // developed. Keep the source document in the canonicalization input so SEC pulling and
-            // image generation continue unchanged, but do not publish HTML-scraped values.
+            // Value extraction will be supplied by the future LLM pipeline. Keep the source
+            // document in the canonicalization input so SEC pulling and candidate artifact
+            // generation continue unchanged, but do not publish inferred values yet.
             documents.push(ExtractedFfoDocument {
                 document: source,
                 values: Vec::new(),
@@ -228,7 +227,15 @@ fn document_mentions_ffo(
         .iter()
         .any(|keyword| metadata.contains(keyword));
     }
-    extract::contains_ffo_metric(&String::from_utf8_lossy(bytes))
+    contains_ffo_metric(&String::from_utf8_lossy(bytes))
+}
+
+fn contains_ffo_metric(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("funds from operations")
+        || lower
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|word| matches!(word, "ffo" | "affo" | "nffo"))
 }
 
 fn filing_calendar_quarter(filing: &crate::common::sec_api::SecFiling) -> Result<String> {
@@ -375,11 +382,6 @@ use crate::common::sec_api::SecFiling;
 #[cfg(test)]
 use discovery::{filing_priority, is_likely_ffo_source, parse_filing_index, resolve_document_url};
 #[cfg(test)]
-use extract::{
-    combined_numeric_cell, contains_ffo_metric, extract_values_from_html, normalize_number
-};
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::ingest_utils::DATA_FETCH_START_DATE;
@@ -484,67 +486,6 @@ mod tests {
             resolve_document_url(index_url, href).as_deref(),
             Some("https://www.sec.gov/Archives/edgar/data/123/1/report.htm")
         );
-    }
-
-    #[test]
-    fn extracts_typed_values_complete_periods_and_reconciliation() {
-        let html = r#"
-            <html><body>
-              <p>We define Core FFO as NAREIT FFO excluding transaction costs.</p>
-              <p>Amounts in thousands, except per share data.</p>
-              <table>
-                <tr><th></th><th>Three Months Ended March 31, 2026</th><th>Three Months Ended March 31, 2025</th></tr>
-                <tr><td>Net income attributable to common shareholders</td><td>$10,000</td><td>($2,000)</td></tr>
-                <tr><td>Real estate depreciation</td><td>20,000</td><td>18,000</td></tr>
-                <tr><td>Core FFO attributable to common shareholders</td><td>$30,000</td><td>$16,000</td></tr>
-                <tr><td>Core FFO per diluted share</td><td>$1.25</td><td>$0.70</td></tr>
-              </table>
-            </body></html>
-        "#;
-        let source = FfoSourceDocument {
-            url: "https://www.sec.gov/Archives/core-ffo.htm".to_owned(),
-            exhibit_type: "EX-99.1".to_owned(),
-            description: "Earnings release".to_owned(),
-            filing_date: "2026-05-01".to_owned(),
-            accession_number: "0000123-26-000001".to_owned(),
-            filing_form: "8-K".to_owned(),
-            filing_index_url: "https://www.sec.gov/Archives/index.html".to_owned(),
-        };
-
-        let values = extract_values_from_html(html, &source);
-
-        assert_eq!(values.len(), 4);
-        assert_eq!(values[0].value_type, "total");
-        assert_eq!(values[0].value, 30_000.0);
-        assert_eq!(
-            values[0].reporting_period,
-            "Three Months Ended March 31, 2026"
-        );
-        assert_eq!(values[0].units.as_deref(), Some("thousands"));
-        assert_eq!(values[0].reconciliation.len(), 3);
-        assert_eq!(values[2].value_type, "perShare");
-        assert_eq!(values[2].value, 1.25);
-    }
-
-    #[test]
-    fn normalizes_accounting_numbers_without_inventing_values() {
-        assert_eq!(normalize_number("($1,234.50)"), Some(-1234.50));
-        assert_eq!(
-            combined_numeric_cell(
-                &[
-                    "Core FFO".to_owned(),
-                    "(".to_owned(),
-                    "1,234".to_owned(),
-                    ")".to_owned(),
-                ],
-                2,
-            ),
-            "(1,234)"
-        );
-        assert_eq!(normalize_number("—"), None);
-        assert_eq!(normalize_number("NAREIT"), None);
-        assert!(!contains_ffo_metric("affordable housing"));
-        assert!(contains_ffo_metric("Adjusted FFO per share"));
     }
 
     #[test]

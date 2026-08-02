@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use super::extract::parse_period;
 use super::models::ExtractedReconciliationRow;
 use super::{
     ExtractedFfoDocument, FfoAdjustment, FfoMeasure, FfoMeasures, FfoPeriodResult, FfoReconciliation, FfoReportingPeriod, ReitFfoData
@@ -240,7 +239,7 @@ fn build_reconciliation(
                 &mut reconciliation.unconsolidated_venture_adjustments,
                 value,
             );
-        } else if let Some(variant) = super::extract::metric_variant_for_reconciliation(&lower) {
+        } else if let Some(variant) = metric_variant(&lower) {
             match variant {
                 "nareitFfo" => reconciliation.nareit_ffo = Some(value),
                 "normalizedFfo" => reconciliation.normalized_ffo = Some(value),
@@ -326,10 +325,114 @@ fn period_order(period_type: &str) -> u8 {
     }
 }
 
+fn parse_period(text: &str) -> Option<(String, String)> {
+    let lower = text.to_ascii_lowercase();
+    let period_type = if lower.contains("three months") || lower.contains("quarter ended") {
+        "quarter"
+    } else if lower.contains("six months") {
+        "sixMonths"
+    } else if lower.contains("nine months") {
+        "nineMonths"
+    } else if lower.contains("twelve months") || lower.contains("year ended") {
+        "year"
+    } else {
+        return None;
+    };
+    let (month, month_number) = [
+        ("january", 1),
+        ("february", 2),
+        ("march", 3),
+        ("april", 4),
+        ("may", 5),
+        ("june", 6),
+        ("july", 7),
+        ("august", 8),
+        ("september", 9),
+        ("october", 10),
+        ("november", 11),
+        ("december", 12),
+    ]
+    .into_iter()
+    .find(|(month, _)| lower.contains(month))?;
+    let after_month = lower.split_once(month)?.1;
+    let day = after_month
+        .split(|character: char| !character.is_ascii_digit())
+        .find(|token| !token.is_empty() && token.len() <= 2)?
+        .parse::<u8>()
+        .ok()?;
+    let year = lower
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|token| token.len() == 4 && token.starts_with("20"))
+        .find_map(|token| token.parse::<u16>().ok())?;
+    time::Date::from_calendar_date(year as i32, time::Month::try_from(month_number).ok()?, day)
+        .ok()?;
+    Some((
+        period_type.to_owned(),
+        format!("{year:04}-{month_number:02}-{day:02}"),
+    ))
+}
+
+fn metric_variant(label: &str) -> Option<&'static str> {
+    let lower = label.to_ascii_lowercase();
+    if !contains_ffo_metric(&lower)
+        || [
+            "impact",
+            "margin",
+            "multiple",
+            "growth",
+            "change in",
+            "guidance",
+        ]
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+        || (lower.contains("share")
+            && (lower.contains("used to calculate") || lower.contains("weighted average")))
+    {
+        return None;
+    }
+    if lower.contains("affo") || lower.contains("adjusted funds from operations") {
+        Some("affo")
+    } else if lower.contains("normalized") || lower.contains("normalised") || lower.contains("nffo")
+    {
+        Some("normalizedFfo")
+    } else if lower.contains("core ffo") || lower.contains("core funds from operations") {
+        Some("coreFfo")
+    } else if lower.contains("pro forma") || lower.contains("pro-forma") {
+        Some("proFormaFfo")
+    } else if lower.contains("adjusted ffo") {
+        Some("adjustedFfo")
+    } else if lower.contains("nareit")
+        || lower.contains("funds from operations")
+        || lower.contains("ffo")
+    {
+        Some("nareitFfo")
+    } else {
+        None
+    }
+}
+
+fn contains_ffo_metric(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("funds from operations")
+        || lower
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|word| matches!(word, "ffo" | "affo" | "nffo"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffo::{FfoSourceDocument, extract::extract_values_from_html};
+    use crate::ffo::FfoSourceDocument;
+    use crate::ffo::models::ReportedFfoValue;
+
+    #[test]
+    fn parses_complete_periods() {
+        assert_eq!(
+            parse_period("Three Months Ended March 31, | 2026"),
+            Some(("quarter".to_owned(), "2026-03-31".to_owned()))
+        );
+        assert_eq!(parse_period("Three Months Ended March 31,"), None);
+    }
 
     #[test]
     fn emits_numeric_period_oriented_data_without_extraction_artifacts() {
@@ -342,19 +445,59 @@ mod tests {
             filing_form: "8-K".to_owned(),
             filing_index_url: "https://www.sec.gov/Archives/index.html".to_owned(),
         };
-        let html = r#"
-            <p>NAREIT FFO and Normalized FFO Reconciliation</p>
-            <p>(In thousands, except share and per share amounts)</p>
-            <table>
-              <tr><th></th><th>Three Months Ended March 31, 2026</th></tr>
-              <tr><td>Net income attributable to controlling interest</td><td>24,011</td></tr>
-              <tr><td>Real estate depreciation and amortization</td><td>66,993</td></tr>
-              <tr><td>NAREIT FFO attributable to controlling interest</td><td>90,354</td></tr>
-              <tr><td>Normalized FFO attributable to controlling interest</td><td>94,815</td></tr>
-              <tr><td>Normalized FFO per common share attributable to controlling interest — diluted</td><td>0.50</td></tr>
-            </table>
-        "#;
-        let values = extract_values_from_html(html, &source);
+        let period = "Three Months Ended March 31, 2026".to_owned();
+        let total = |variant: &str, label: &str, value: f64, reconciliation| ReportedFfoValue {
+            variant: variant.to_owned(),
+            company_label: label.to_owned(),
+            value_type: "total".to_owned(),
+            value,
+            reporting_period: period.clone(),
+            units: Some("thousandsExceptShares".to_owned()),
+            reconciliation,
+        };
+        let reconciliation = vec![
+            ExtractedReconciliationRow {
+                label: "Net income attributable to controlling interest".to_owned(),
+                value: 24_011.0,
+            },
+            ExtractedReconciliationRow {
+                label: "Real estate depreciation and amortization".to_owned(),
+                value: 66_993.0,
+            },
+            ExtractedReconciliationRow {
+                label: "NAREIT FFO attributable to controlling interest".to_owned(),
+                value: 90_354.0,
+            },
+            ExtractedReconciliationRow {
+                label: "Normalized FFO attributable to controlling interest".to_owned(),
+                value: 94_815.0,
+            },
+        ];
+        let values = vec![
+            total(
+                "nareitFfo",
+                "NAREIT FFO attributable to controlling interest",
+                90_354.0,
+                reconciliation.clone(),
+            ),
+            total(
+                "normalizedFfo",
+                "Normalized FFO attributable to controlling interest",
+                94_815.0,
+                reconciliation,
+            ),
+            ReportedFfoValue {
+                variant: "normalizedFfo".to_owned(),
+                company_label:
+                    "Normalized FFO per common share attributable to controlling interest — diluted"
+                        .to_owned(),
+                value_type: "perShare".to_owned(),
+                value: 0.50,
+                reporting_period: period,
+                units: Some("currency per share".to_owned()),
+                reconciliation: Vec::new(),
+            },
+        ];
         let data = canonicalize(
             "AHR",
             "1632970",

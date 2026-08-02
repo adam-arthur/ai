@@ -126,8 +126,8 @@ pub struct ReitFfoData {
     pub periods: Vec<FfoPeriodResult>,
 }
 
-// The following types are deliberately internal. They retain just enough context to turn a
-// source table into the canonical model above and are never serialized into data/ffo/*.json.
+// The following types are deliberately internal. They retain just enough context to build the
+// canonical model above and are never serialized into data/ffo/*.json.
 
 #[derive(Clone, Debug)]
 pub(super) struct ExtractedReconciliationRow {
