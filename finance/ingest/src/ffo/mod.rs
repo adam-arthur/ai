@@ -15,6 +15,7 @@ mod canonical;
 mod discovery;
 mod extract;
 mod models;
+mod vision;
 
 use models::ExtractedFfoDocument;
 pub use models::{
@@ -66,6 +67,17 @@ pub async fn fetch_reit_ffo_data(
         let file_name = source_file_name(&source.url);
         let local_path = document_dir.join(file_name);
         let (bytes, content_type) = load_or_fetch_source_document(&source.url, &local_path).await?;
+
+        match vision::ensure_candidate_images(&local_path, content_type.as_deref(), &bytes).await {
+            Ok(count) => log::debug!(
+                "FFO vision - cached {count} candidate image(s) for {}",
+                local_path.display()
+            ),
+            Err(error) => log::warn!(
+                "FFO vision - failed for {}: {error:#}",
+                local_path.display()
+            ),
+        }
 
         documents.push(extract::extract_downloaded_document(
             source,

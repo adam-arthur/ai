@@ -1,28 +1,27 @@
 use std::{
-    collections::VecDeque, env, fs, path::{Path, PathBuf}, process::Command
+    collections::VecDeque, env, fs, path::{Path, PathBuf}, process::Command, sync::{
+        Arc, atomic::{AtomicU64, Ordering}
+    }
 };
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use once_cell::sync::Lazy;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 
 const MAX_CONTEXT_ITEMS: usize = 4;
 const MAX_CONTEXT_LENGTH: usize = 400;
 const MIN_CANDIDATE_SCORE: i32 = 12;
 const MAX_IMAGE_WIDTH: u32 = 2_400;
 const MAX_IMAGE_HEIGHT: u32 = 16_000;
+const MAX_CHROME_INSTANCES: usize = 4;
 
-#[derive(Debug, Parser)]
-#[command(about = "Cache screenshots of likely FFO/AFFO tables from one SEC HTML document")]
-struct Args {
-    /// Cached SEC .htm or .html document to inspect.
-    source: PathBuf,
-
-    /// Chrome/Chromium executable. Defaults to CHROME_BIN, then common install locations.
-    #[arg(long)]
-    chrome: Option<PathBuf>,
-}
+static CHROME_LIMIT: Lazy<Arc<Semaphore>> =
+    Lazy::new(|| Arc::new(Semaphore::new(MAX_CHROME_INSTANCES)));
+static CHROME: Lazy<std::result::Result<PathBuf, String>> =
+    Lazy::new(|| resolve_chrome().map_err(|error| format!("{error:#}")));
+static STAGING_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,24 +58,36 @@ struct CandidateScore {
     matched_terms: Vec<String>,
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-    let source = args
-        .source
-        .canonicalize()
-        .with_context(|| format!("failed to resolve {}", args.source.display()))?;
-    validate_source(&source)?;
+pub(super) async fn ensure_candidate_images(
+    source: &Path,
+    content_type: Option<&str>,
+    source_bytes: &[u8],
+) -> Result<usize> {
+    if is_pdf(source, content_type, source_bytes) {
+        return Ok(0);
+    }
 
-    let output_dir = output_dir(&source)?;
+    let source = source.to_path_buf();
+    let source_bytes = source_bytes.to_vec();
+    let permit = CHROME_LIMIT
+        .clone()
+        .acquire_owned()
+        .await
+        .context("FFO image-generation semaphore closed")?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        generate_candidate_images(&source, &source_bytes)
+    })
+    .await
+    .context("FFO image-generation task panicked")?
+}
+
+fn generate_candidate_images(source: &Path, source_bytes: &[u8]) -> Result<usize> {
+    let output_dir = output_dir(source)?;
     let manifest_path = output_dir.join("manifest.json");
     if manifest_path.is_file() {
         let manifest = read_complete_manifest(&manifest_path, &output_dir)?;
-        println!(
-            "Using {} cached candidate image(s) from {}",
-            manifest.candidates.len(),
-            output_dir.display()
-        );
-        return Ok(());
+        return Ok(manifest.candidates.len());
     }
     if output_dir.exists() {
         bail!(
@@ -85,14 +96,17 @@ fn main() -> Result<()> {
         );
     }
 
-    let source_bytes =
-        fs::read(&source).with_context(|| format!("failed to read {}", source.display()))?;
-    let html = String::from_utf8_lossy(&source_bytes);
+    let html = String::from_utf8_lossy(source_bytes);
     let candidates = find_candidates(&html);
-    fs::create_dir_all(&output_dir)
-        .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    let output_parent = output_dir
+        .parent()
+        .context("FFO image output has no parent directory")?;
+    fs::create_dir_all(output_parent)
+        .with_context(|| format!("failed to create {}", output_parent.display()))?;
+    let staging_dir = staging_dir(&output_dir)?;
+    fs::create_dir(&staging_dir)
+        .with_context(|| format!("failed to create {}", staging_dir.display()))?;
 
-    let chrome = resolve_chrome(args.chrome.as_deref())?;
     let source_document = source
         .file_name()
         .context("source document has no file name")?
@@ -103,46 +117,59 @@ fn main() -> Result<()> {
         candidates: Vec::with_capacity(candidates.len()),
     };
 
-    for (offset, candidate) in candidates.into_iter().enumerate() {
-        let index = offset + 1;
-        let image_name = format!("candidate-{index:03}.png");
-        let image_path = output_dir.join(&image_name);
-        let evidence_html = evidence_document(&candidate);
-        let dimensions =
-            render_candidate(&chrome, &output_dir, index, &evidence_html, &image_path)?;
-        manifest.candidates.push(ManifestCandidate {
-            index,
-            table_index: candidate.table_index,
-            image: image_name,
-            score: candidate.score,
-            matched_terms: candidate.matched_terms,
-            context: candidate.context,
-            viewport_width: dimensions.0,
-            viewport_height: dimensions.1,
-        });
-    }
+    let result = (|| {
+        if !candidates.is_empty() {
+            let chrome = chrome()?;
+            for (offset, candidate) in candidates.into_iter().enumerate() {
+                let index = offset + 1;
+                let image_name = format!("candidate-{index:03}.png");
+                let image_path = staging_dir.join(&image_name);
+                let evidence_html = evidence_document(&candidate);
+                let dimensions =
+                    render_candidate(chrome, &staging_dir, index, &evidence_html, &image_path)?;
+                manifest.candidates.push(ManifestCandidate {
+                    index,
+                    table_index: candidate.table_index,
+                    image: image_name,
+                    score: candidate.score,
+                    matched_terms: candidate.matched_terms,
+                    context: candidate.context,
+                    viewport_width: dimensions.0,
+                    viewport_height: dimensions.1,
+                });
+            }
+        }
 
-    write_manifest(&manifest_path, &manifest)?;
-    println!(
-        "Cached {} candidate image(s) in {}",
-        manifest.candidates.len(),
-        output_dir.display()
-    );
-    Ok(())
+        write_manifest(&staging_dir.join("manifest.json"), &manifest)?;
+        fs::rename(&staging_dir, &output_dir)
+            .with_context(|| format!("failed to replace {}", output_dir.display()))?;
+        Ok(manifest.candidates.len())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging_dir);
+    }
+    result
 }
 
-fn validate_source(source: &Path) -> Result<()> {
-    if !source.is_file() {
-        bail!("{} is not a file", source.display());
-    }
-    let extension = source
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    if !extension.eq_ignore_ascii_case("htm") && !extension.eq_ignore_ascii_case("html") {
-        bail!("{} is not an .htm or .html document", source.display());
-    }
-    Ok(())
+fn is_pdf(source: &Path, content_type: Option<&str>, bytes: &[u8]) -> bool {
+    bytes.starts_with(b"%PDF-")
+        || content_type.is_some_and(|value| value.to_ascii_lowercase().contains("pdf"))
+        || source
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+}
+
+fn staging_dir(output_dir: &Path) -> Result<PathBuf> {
+    let parent = output_dir
+        .parent()
+        .context("FFO image output has no parent directory")?;
+    let name = output_dir
+        .file_name()
+        .context("FFO image output has no file name")?
+        .to_string_lossy();
+    let id = STAGING_ID.fetch_add(1, Ordering::Relaxed);
+    Ok(parent.join(format!(".{name}.tmp-{}-{id}", std::process::id())))
 }
 
 fn output_dir(source: &Path) -> Result<PathBuf> {
@@ -453,11 +480,10 @@ fn evidence_dimensions(rendered_html: &str) -> Result<(u32, u32)> {
     Ok((width, height))
 }
 
-fn resolve_chrome(explicit: Option<&Path>) -> Result<PathBuf> {
-    let candidates = explicit
-        .map(Path::to_path_buf)
+fn resolve_chrome() -> Result<PathBuf> {
+    let candidates = env::var_os("CHROME_BIN")
+        .map(PathBuf::from)
         .into_iter()
-        .chain(env::var_os("CHROME_BIN").map(PathBuf::from))
         .chain(
             [
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -473,7 +499,14 @@ fn resolve_chrome(explicit: Option<&Path>) -> Result<PathBuf> {
             return Ok(candidate);
         }
     }
-    bail!("Chrome/Chromium not found; pass --chrome or set CHROME_BIN")
+    bail!("Chrome/Chromium not found; set CHROME_BIN")
+}
+
+fn chrome() -> Result<&'static Path> {
+    CHROME
+        .as_ref()
+        .map(PathBuf::as_path)
+        .map_err(|error| anyhow::anyhow!(error.clone()))
 }
 
 fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
