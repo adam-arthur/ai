@@ -9,6 +9,8 @@ use once_cell::sync::Lazy;
 use scraper::{Html, Selector};
 use tokio::sync::Semaphore;
 
+use super::table_html::clean_table_html;
+
 const MAX_CONTEXT_ITEMS: usize = 4;
 const MAX_CONTEXT_LENGTH: usize = 400;
 const MIN_CANDIDATE_SCORE: i32 = 12;
@@ -125,7 +127,9 @@ fn candidate_table_name(source_document: &str, index: usize) -> String {
 }
 
 fn write_candidate_table(path: &Path, table_html: &str) -> Result<()> {
-    fs::write(path, table_html).with_context(|| format!("failed to write {}", path.display()))
+    let cleaned = clean_table_html(table_html)
+        .with_context(|| format!("failed to clean table HTML for {}", path.display()))?;
+    fs::write(path, cleaned).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn publish_staging_dir(staging_dir: &Path, output_dir: &Path) -> Result<()> {
@@ -499,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_candidate_table_html_without_the_render_wrapper() {
+    fn writes_clean_candidate_table_html_without_the_render_wrapper() {
         let test_dir = std::env::temp_dir().join(format!(
             "ffo-table-test-{}-{}",
             std::process::id(),
@@ -507,11 +511,14 @@ mod tests {
         ));
         fs::create_dir(&test_dir).unwrap();
         let table_path = test_dir.join("filing.htm-1.html");
-        let table_html = r#"<table style="width: 100%"><tr><td>FFO</td><td>(42)</td></tr></table>"#;
+        let table_html = r#"<table style="width: 100%"><tr><td><font face="Arial">FFO</font></td><td align="right">(42)</td></tr></table>"#;
 
         write_candidate_table(&table_path, table_html).unwrap();
 
-        assert_eq!(fs::read_to_string(&table_path).unwrap(), table_html);
+        assert_eq!(
+            fs::read_to_string(&table_path).unwrap(),
+            "<table><tbody><tr><td>FFO</td><td>(42)</td></tr></tbody></table>"
+        );
         fs::remove_dir_all(test_dir).unwrap();
     }
 

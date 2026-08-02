@@ -15,6 +15,7 @@ mod canonical;
 mod discovery;
 mod extract;
 mod models;
+mod table_html;
 mod vision;
 
 use models::ExtractedFfoDocument;
