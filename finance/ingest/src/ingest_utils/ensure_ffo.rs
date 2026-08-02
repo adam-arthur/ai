@@ -6,7 +6,7 @@ use std::{
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    ffo::{ReitFfoData, fetch_reit_ffo_data_to_cache}, file_utils::write_json_atomic, meta_utils::get_app_data_path
+    ffo::{ReitFfoData, fetch_reit_ffo_data_to_cache}, file_utils::write_json_atomic, financials::local_api::read_corporate_actions_from, meta_utils::get_app_data_path
 };
 
 use super::common::EnsureDataResult;
@@ -26,9 +26,15 @@ fn ffo_path(data_path: &Path, symbol: &str) -> PathBuf {
 }
 
 pub async fn ensure_ffo(symbol: &str, cik: &str) -> Result<EnsureDataResult<ReitFfoData>> {
-    let path = ffo_path(get_app_data_path(), symbol);
+    let data_path = get_app_data_path();
+    let path = ffo_path(data_path, symbol);
+    let corporate_actions = read_corporate_actions_from(data_path, symbol).with_context(|| {
+        format!("failed to read corporate actions for FFO calculation of {symbol}")
+    })?;
+    let name_changes = crate::ffo::ffo_name_changes(&corporate_actions);
     if let Some(cached) = read_ffo_file(&path)
         && is_fresh(&cached.updated_at)
+        && cached.data.name_changes == name_changes
     {
         log::info!("{} - FFO - data already exists, using cache...", symbol);
         return Ok(EnsureDataResult {
@@ -38,7 +44,7 @@ pub async fn ensure_ffo(symbol: &str, cik: &str) -> Result<EnsureDataResult<Reit
     }
 
     log::info!("{} - FFO - fetching SEC source filings...", symbol);
-    let data = fetch_reit_ffo_data_to_cache(symbol, cik)
+    let data = fetch_reit_ffo_data_to_cache(symbol, cik, name_changes)
         .await
         .with_context(|| format!("failed to fetch FFO data for {symbol} (CIK {cik})"))?;
     let file = FfoFile {
@@ -88,6 +94,7 @@ mod tests {
             data: ReitFfoData {
                 symbol: "AHR".to_owned(),
                 cik: "1632970".to_owned(),
+                name_changes: Vec::new(),
                 periods: Vec::new(),
             },
         };

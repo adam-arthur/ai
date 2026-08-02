@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 
 use super::models::ExtractedReconciliationRow;
 use super::{
-    ExtractedFfoDocument, FfoAdjustment, FfoMeasure, FfoMeasures, FfoPeriodResult, FfoReconciliation, FfoReportingPeriod, ReitFfoData
+    ExtractedFfoDocument, FfoAdjustment, FfoMeasure, FfoMeasures, FfoNameChange, FfoPeriodResult, FfoReconciliation, FfoReportingPeriod, ReitFfoData
 };
 
 pub(super) fn canonicalize(
     symbol: &str,
     cik: &str,
+    name_changes: Vec<FfoNameChange>,
     mut documents: Vec<ExtractedFfoDocument>,
 ) -> ReitFfoData {
     documents.sort_by(|left, right| {
@@ -82,6 +83,7 @@ pub(super) fn canonicalize(
     ReitFfoData {
         symbol: symbol.to_owned(),
         cik: cik.to_owned(),
+        name_changes,
         periods,
     }
 }
@@ -501,6 +503,7 @@ mod tests {
         let data = canonicalize(
             "AHR",
             "1632970",
+            Vec::new(),
             vec![ExtractedFfoDocument {
                 document: source,
                 values,

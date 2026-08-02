@@ -18,12 +18,15 @@ mod table_html;
 mod vision;
 
 use models::ExtractedFfoDocument;
+pub(crate) use models::ffo_name_changes;
 pub use models::{
-    FfoAdjustment, FfoMeasure, FfoMeasures, FfoPeriodResult, FfoReconciliation, FfoReportingPeriod, FfoSourceDocument, ReitFfoData, ReitFfoSources
+    FfoAdjustment, FfoMeasure, FfoMeasures, FfoNameChange, FfoPeriodResult, FfoReconciliation, FfoReportingPeriod, FfoSourceDocument, ReitFfoData, ReitFfoSources
 };
 
 use crate::file_utils::write_json_atomic;
-use crate::{common::sec_api::fetch_sec_document, meta_utils::get_app_data_path};
+use crate::{
+    common::sec_api::fetch_sec_document, financials::local_api::read_corporate_actions_from, meta_utils::get_app_data_path
+};
 
 const PROCESSED_FILINGS_FILE: &str = "processed-filings.json";
 
@@ -57,6 +60,7 @@ pub async fn fetch_reit_ffo_sources_batch(
 pub async fn fetch_reit_ffo_data(
     symbol: &str,
     cik: &str,
+    name_changes: Vec<FfoNameChange>,
     sources_dir: impl AsRef<Path>,
 ) -> Result<ReitFfoData> {
     let issuer_dir = issuer_source_dir(sources_dir.as_ref(), symbol);
@@ -164,14 +168,25 @@ pub async fn fetch_reit_ffo_data(
     Ok(canonical::canonicalize(
         symbol,
         cik.trim_start_matches('0'),
+        name_changes,
         documents,
     ))
 }
 
 /// Uses the repository's persistent source cache (`data/ffo/sources` in the default setup).
 #[allow(dead_code)]
-pub async fn fetch_reit_ffo_data_to_cache(symbol: &str, cik: &str) -> Result<ReitFfoData> {
-    fetch_reit_ffo_data(symbol, cik, get_app_data_path().join("ffo").join("sources")).await
+pub async fn fetch_reit_ffo_data_to_cache(
+    symbol: &str,
+    cik: &str,
+    name_changes: Vec<FfoNameChange>,
+) -> Result<ReitFfoData> {
+    fetch_reit_ffo_data(
+        symbol,
+        cik,
+        name_changes,
+        get_app_data_path().join("ffo").join("sources"),
+    )
+    .await
 }
 
 /// Sequential batch variant that honors the SEC fair-access request rate and caller issuer order.
@@ -181,7 +196,10 @@ pub async fn fetch_reit_ffo_data_batch_to_cache(
 ) -> Result<Vec<ReitFfoData>> {
     let mut results = Vec::new();
     for (symbol, cik) in issuers {
-        results.push(fetch_reit_ffo_data_to_cache(symbol.as_ref(), cik.as_ref()).await?);
+        let symbol = symbol.as_ref();
+        let corporate_actions = read_corporate_actions_from(get_app_data_path(), symbol)?;
+        let name_changes = ffo_name_changes(&corporate_actions);
+        results.push(fetch_reit_ffo_data_to_cache(symbol, cik.as_ref(), name_changes).await?);
     }
     Ok(results)
 }
