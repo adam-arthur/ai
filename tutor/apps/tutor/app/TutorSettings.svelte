@@ -1,26 +1,22 @@
 <script lang="ts">
-  import {
-    koreanTutorTurnSpeechSynthesisModels,
-    koreanTutorTurnTextModels,
-    koreanTutorTurnTranscriptionModels,
-  } from '@ai/language-tutor/korean/types.ts'
   import type {
     KoreanTutorLevel,
-    KoreanTutorTurnModelConfiguration,
-    KoreanTutorTurnSpeechSynthesisModel,
-    KoreanTutorTurnTextModel,
-    KoreanTutorTurnTranscriptionModel,
-  } from '@ai/language-tutor/korean/types.ts'
+    ModelConfiguration,
+    SpeechSynthesisModel,
+    TextModel,
+    TranscriptionModel,
+  } from '#tutor/app/generated/api.ts'
+  import { speechSynthesisModels, textModels, transcriptionModels } from '#tutor/app/models.ts'
 
   const tutorLevels: KoreanTutorLevel[] = ['A1', 'A2']
   const modelLabels = {
     'gemini-3.1-flash-lite': 'Gemini Flash-Lite',
     'gemini-3.5-flash': 'Gemini Flash',
     'gpt-4o-mini-transcribe': 'GPT-4o Mini',
-    'gpt-4o-mini-tts': 'GPT-4o Mini',
     'gpt-4o-transcribe': 'GPT-4o',
     'gpt-5.5': 'GPT-5.5',
-  } satisfies Record<KoreanTutorTurnTextModel | KoreanTutorTurnTranscriptionModel | KoreanTutorTurnSpeechSynthesisModel, string>
+    'tts-1': 'OpenAI TTS',
+  } satisfies Record<TextModel | TranscriptionModel | SpeechSynthesisModel, string>
   const modelProfiles = [
     {
       id: 'reliable',
@@ -28,7 +24,7 @@
       modelConfiguration: {
         mistakeDetection: 'gemini-3.1-flash-lite',
         reply: 'gemini-3.1-flash-lite',
-        speechSynthesis: 'gpt-4o-mini-tts',
+        speechSynthesis: 'tts-1',
         transcription: 'gpt-4o-mini-transcribe',
       },
     },
@@ -38,7 +34,7 @@
       modelConfiguration: {
         mistakeDetection: 'gemini-3.1-flash-lite',
         reply: 'gemini-3.5-flash',
-        speechSynthesis: 'gpt-4o-mini-tts',
+        speechSynthesis: 'tts-1',
         transcription: 'gpt-4o-mini-transcribe',
       },
     },
@@ -48,7 +44,7 @@
       modelConfiguration: {
         mistakeDetection: 'gemini-3.1-flash-lite',
         reply: 'gpt-5.5',
-        speechSynthesis: 'gpt-4o-mini-tts',
+        speechSynthesis: 'tts-1',
         transcription: 'gpt-4o-mini-transcribe',
       },
     },
@@ -77,11 +73,11 @@
   )
   const playbackSpeedLabel = $derived(`${playbackSpeed.toFixed(2)}x`)
 
-  function applyModelProfile(args: { modelConfiguration: KoreanTutorTurnModelConfiguration }): void {
+  function applyModelProfile(args: { modelConfiguration: ModelConfiguration }): void {
     modelConfiguration = { ...args.modelConfiguration }
   }
 
-  function updateModelConfiguration(args: Partial<KoreanTutorTurnModelConfiguration>): void {
+  function updateModelConfiguration(args: Partial<ModelConfiguration>): void {
     modelConfiguration = {
       ...modelConfiguration,
       ...args,
@@ -89,8 +85,8 @@
   }
 
   function hasSameModelConfiguration(args: {
-    left: KoreanTutorTurnModelConfiguration
-    right: KoreanTutorTurnModelConfiguration
+    left: ModelConfiguration
+    right: ModelConfiguration
   }): boolean {
     return (
       args.left.mistakeDetection === args.right.mistakeDetection &&
@@ -102,7 +98,7 @@
 
   type TutorSettingsProps = {
     autoTurnSilenceMs: number
-    modelConfiguration: KoreanTutorTurnModelConfiguration
+    modelConfiguration: ModelConfiguration
     playbackSpeed: number
     sessionBusy: boolean
     sessionSettingDisabled: boolean
@@ -112,7 +108,7 @@
   type TutorModelProfile = {
     id: string
     label: string
-    modelConfiguration: KoreanTutorTurnModelConfiguration
+    modelConfiguration: ModelConfiguration
   }
 </script>
 
@@ -158,10 +154,10 @@
         <span>Mistakes</span>
         <select
           disabled={sessionSettingDisabled}
-          onchange={event => updateModelConfiguration({ mistakeDetection: event.currentTarget.value as KoreanTutorTurnTextModel })}
+          onchange={event => updateModelConfiguration({ mistakeDetection: event.currentTarget.value as TextModel })}
           value={modelConfiguration.mistakeDetection}
         >
-          {#each koreanTutorTurnTextModels as model}
+          {#each textModels as model}
             <option value={model}>{modelLabels[model]}</option>
           {/each}
         </select>
@@ -171,10 +167,10 @@
         <span>Reply</span>
         <select
           disabled={sessionSettingDisabled}
-          onchange={event => updateModelConfiguration({ reply: event.currentTarget.value as KoreanTutorTurnTextModel })}
+          onchange={event => updateModelConfiguration({ reply: event.currentTarget.value as TextModel })}
           value={modelConfiguration.reply}
         >
-          {#each koreanTutorTurnTextModels as model}
+          {#each textModels as model}
             <option value={model}>{modelLabels[model]}</option>
           {/each}
         </select>
@@ -184,10 +180,10 @@
         <span>Speech to text</span>
         <select
           disabled={sessionSettingDisabled}
-          onchange={event => updateModelConfiguration({ transcription: event.currentTarget.value as KoreanTutorTurnTranscriptionModel })}
+          onchange={event => updateModelConfiguration({ transcription: event.currentTarget.value as TranscriptionModel })}
           value={modelConfiguration.transcription}
         >
-          {#each koreanTutorTurnTranscriptionModels as model}
+          {#each transcriptionModels as model}
             <option value={model}>{modelLabels[model]}</option>
           {/each}
         </select>
@@ -198,10 +194,10 @@
         <select
           disabled={sessionSettingDisabled}
           onchange={event =>
-            updateModelConfiguration({ speechSynthesis: event.currentTarget.value as KoreanTutorTurnSpeechSynthesisModel })}
+            updateModelConfiguration({ speechSynthesis: event.currentTarget.value as SpeechSynthesisModel })}
           value={modelConfiguration.speechSynthesis}
         >
-          {#each koreanTutorTurnSpeechSynthesisModels as model}
+          {#each speechSynthesisModels as model}
             <option value={model}>{modelLabels[model]}</option>
           {/each}
         </select>

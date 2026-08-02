@@ -3,24 +3,16 @@ export { config as default }
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { defineConfig } from 'vite'
 
-import { createKoreanTutorTurnVoiceSessionMiddleware } from '@ai/language-tutor/korean/createKoreanTutorTurnVoiceSessionMiddleware.ts'
-
 const config = defineConfig({
-  plugins: [
-    svelte(),
-    {
-      name: 'tutor-voice-session',
-      configureServer(server) {
-        server.middlewares.use(createKoreanTutorTurnVoiceSessionMiddleware())
-      },
-      configurePreviewServer(server) {
-        server.middlewares.use(createKoreanTutorTurnVoiceSessionMiddleware())
-      },
-    },
-  ],
+  plugins: [svelte()],
   resolve: {
     alias: {
       '#tutor': new URL('.', import.meta.url).pathname,
+    },
+  },
+  server: {
+    proxy: {
+      '/api': 'http://127.0.0.1:3000',
     },
   },
 })

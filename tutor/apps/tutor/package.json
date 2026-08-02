@@ -12,7 +12,6 @@
   },
   "dependencies": {
     "@ai/browser-audio": "*",
-    "@ai/language-tutor": "*",
     "@ricky0123/vad-web": "^0.0.30",
     "onnxruntime-web": "^1.26.0",
     "svelte": "^5.38.10"

@@ -7,35 +7,31 @@
   import SessionHeader from '#tutor/app/SessionHeader.svelte'
   import TranscriptPanel from '#tutor/app/TranscriptPanel.svelte'
   import TutorSettings from '#tutor/app/TutorSettings.svelte'
+  import { createTutorSessionClient } from '#tutor/app/api.ts'
+  import type { AudioInput } from '#tutor/app/api.ts'
+  import type { ClientEvent, KoreanTutorLevel, ModelConfiguration } from '#tutor/app/generated/api.ts'
+  import { defaultModelConfiguration } from '#tutor/app/models.ts'
   import { formatMessageTime, toErrorMessage } from '#tutor/app/utils.ts'
   import type { InputTranscription, MicrophoneStatus, SessionStatus, TranscriptMessage, TurnMistakes } from '#tutor/app/types.ts'
   import { createMicrophoneRecorder } from '@ai/browser-audio/createMicrophoneRecorder.ts'
   import { createPcmAudioPlayer } from '@ai/browser-audio/createPcmAudioPlayer.ts'
-  import { createKoreanTutorTurnVoiceSessionClient } from '@ai/language-tutor/korean/createKoreanTutorTurnVoiceSessionClient.ts'
-  import type {
-    KoreanTutorLevel,
-    KoreanTutorTurnModelConfiguration,
-    KoreanTutorTurnVoiceSessionAudioInput,
-    KoreanTutorTurnVoiceSessionClientEvent,
-  } from '@ai/language-tutor/korean/types.ts'
-  import { defaultKoreanTutorTurnModelConfiguration } from '@ai/language-tutor/korean/types.ts'
   import onnxRuntimeWasmModuleUrl from 'onnxruntime-web/ort-wasm-simd-threaded.mjs?url'
   import onnxRuntimeWasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.wasm?url'
 
   const prespeechChunkLimit = 4
   const microphoneRecorder = createMicrophoneRecorder()
   const pcmAudioPlayer = createPcmAudioPlayer()
-  const turnVoiceSessionClient = createKoreanTutorTurnVoiceSessionClient()
+  const turnVoiceSessionClient = createTutorSessionClient()
 
   let activeAgentMessageId = $state<string | undefined>()
-  let activeAudioChunks: KoreanTutorTurnVoiceSessionAudioInput[] = []
+  let activeAudioChunks: AudioInput[] = []
   let autoPauseAfterResponse = $state(false)
   let autoTurnSilenceMs = $state(1000)
   let currentInputId = $state<string | undefined>()
   let errorMessage = $state<string | undefined>()
   let microphoneStatus = $state<MicrophoneStatus>('idle')
-  let modelConfiguration = $state<KoreanTutorTurnModelConfiguration>({ ...defaultKoreanTutorTurnModelConfiguration })
-  let pendingAudioChunks: KoreanTutorTurnVoiceSessionAudioInput[] = []
+  let modelConfiguration = $state<ModelConfiguration>({ ...defaultModelConfiguration })
+  let pendingAudioChunks: AudioInput[] = []
   let playbackSpeed = $state(1)
   let silenceStartedAt: number | undefined
   let sessionStatus = $state<SessionStatus>('idle')
@@ -182,8 +178,8 @@
     }
   }
 
-  function handleTurnVoiceSessionEvent(event: KoreanTutorTurnVoiceSessionClientEvent): void {
-    const handleEvent = turnVoiceSessionEventHandlers[event.type] as (event: KoreanTutorTurnVoiceSessionClientEvent) => void
+  function handleTurnVoiceSessionEvent(event: ClientEvent): void {
+    const handleEvent = turnVoiceSessionEventHandlers[event.type] as (event: ClientEvent) => void
 
     handleEvent(event)
   }
@@ -249,7 +245,7 @@
     autoPauseAfterResponse = !autoPauseAfterResponse
   }
 
-  function handleMicrophoneAudio(audio: KoreanTutorTurnVoiceSessionAudioInput & { speechDetected: boolean; voiceDetected: boolean }): void {
+  function handleMicrophoneAudio(audio: AudioInput & { speechDetected: boolean; voiceDetected: boolean }): void {
     if (turnProcessing) {
       return
     }
@@ -319,7 +315,7 @@
     }
   }
 
-  function mergeAudioChunks(audioChunks: KoreanTutorTurnVoiceSessionAudioInput[]): KoreanTutorTurnVoiceSessionAudioInput {
+  function mergeAudioChunks(audioChunks: AudioInput[]): AudioInput {
     const firstChunk = audioChunks[0]
 
     if (!firstChunk) {
@@ -416,7 +412,7 @@
   }
 
   type TurnVoiceSessionEventHandlerMap = {
-    [TEvent in KoreanTutorTurnVoiceSessionClientEvent as TEvent['type']]: (event: TEvent) => void
+    [TEvent in ClientEvent as TEvent['type']]: (event: TEvent) => void
   }
 </script>
 

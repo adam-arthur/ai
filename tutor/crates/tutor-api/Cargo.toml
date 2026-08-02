@@ -1,0 +1,22 @@
+[package]
+name = "tutor-api"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+base64.workspace = true
+language-tutor = { path = "../language-tutor" }
+llm-core = { path = "../llm-core" }
+serde.workspace = true
+serde_json.workspace = true
+tokio-stream.workspace = true
+ts-rs.workspace = true
+uuid.workspace = true
+voice-session = { path = "../voice-session" }
+
+[lints]
+workspace = true
+

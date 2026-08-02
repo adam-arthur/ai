@@ -1,5 +1,5 @@
 {
-  "name": "ai",
+  "name": "tutor",
   "private": true,
   "workspaces": [
     "apps/*",
@@ -7,13 +7,17 @@
   ],
   "type": "module",
   "scripts": {
+    "dev:server": "cargo run -p tutor-server",
+    "dev:web": "npm --workspace @ai/tutor run dev",
+    "build": "cargo build --workspace --release && npm --workspace @ai/tutor run build",
+    "generate:types": "cargo run -p tutor-server --bin export-types",
     "typecheck": "tsc --noEmit",
-    "format": "oxfmt --write .",
-    "lint": "oxlint",
+    "format": "cargo fmt --all && oxfmt --write .",
+    "lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings && oxlint",
     "lint:fix": "oxlint --fix",
-    "test": "npm --workspaces --if-present test",
+    "test": "cargo test --workspace && npm --workspaces --if-present test",
     "workspace:check": "npm --workspaces --if-present run check",
-    "check": "npm run format && npm run lint:fix && npm run lint && npm run typecheck && npm run workspace:check && npm test"
+    "check": "npm run format && npm run lint:fix && npm run lint && npm run typecheck && npm run workspace:check && npm test && npm --workspace @ai/tutor run build"
   },
   "devDependencies": {
     "eslint-plugin-import": "^2.32.0",
