@@ -30,6 +30,9 @@ const PRESERVED_ATTRIBUTES: &[&str] = &[
 ];
 
 const STRUCTURAL_ELEMENTS: &[&str] = &["table", "colgroup", "thead", "tbody", "tfoot", "tr"];
+const TEXT_TABLE_MAX_WIDTH: usize = 120;
+const TEXT_TABLE_GUTTER: usize = 2;
+const TEXT_TABLE_NUMERIC_MAX_WIDTH: usize = 24;
 
 #[derive(Debug, Eq, PartialEq)]
 enum SemanticToken {
@@ -46,6 +49,401 @@ pub(super) fn clean_table_html(table_html: &str) -> Result<String> {
         bail!("table HTML cleanup is not idempotent");
     }
     Ok(cleaned)
+}
+
+pub(super) fn render_table_text(table_html: &str) -> Result<String> {
+    let cleaned = clean_table_html(table_html)?;
+    let document = Html::parse_fragment(&cleaned);
+    let grid = TextGrid::from_document(&document)?;
+    Ok(grid.render(TEXT_TABLE_MAX_WIDTH))
+}
+
+#[derive(Debug)]
+struct TextGridCell {
+    start: usize,
+    colspan: usize,
+    text: String,
+    header: bool,
+}
+
+#[derive(Debug)]
+struct TextGridRow {
+    cells: Vec<TextGridCell>,
+}
+
+#[derive(Debug)]
+struct TextGrid {
+    width: usize,
+    rows: Vec<TextGridRow>,
+}
+
+impl TextGrid {
+    fn from_document(document: &Html) -> Result<Self> {
+        let table = only_table(document)?;
+        let row_selector = Selector::parse("tr").expect("valid row selector");
+        let mut occupied_until = Vec::<usize>::new();
+        let mut rows = Vec::new();
+        let mut width = 0;
+        let mut current_group = None;
+        let mut group_row_index = 0;
+
+        for row in table.select(&row_selector) {
+            let group = row.ancestors().find_map(|ancestor| {
+                ancestor.value().as_element().and_then(|element| {
+                    matches!(element.name(), "thead" | "tbody" | "tfoot").then(|| ancestor.id())
+                })
+            });
+            if group != current_group {
+                occupied_until.clear();
+                current_group = group;
+                group_row_index = 0;
+            }
+
+            let mut next_column = 0;
+            let mut grid_cells = Vec::new();
+            for cell in row
+                .children()
+                .filter_map(ElementRef::wrap)
+                .filter(|cell| matches!(cell.value().name(), "td" | "th"))
+            {
+                let colspan = parse_span(cell.value().attr("colspan"))
+                    .context("table cell has an invalid colspan")?;
+                let rowspan = parse_span(cell.value().attr("rowspan"))
+                    .context("table cell has an invalid rowspan")?;
+
+                loop {
+                    while occupied_until
+                        .get(next_column)
+                        .is_some_and(|until| *until > group_row_index)
+                    {
+                        next_column += 1;
+                    }
+                    let conflict = (next_column..next_column + colspan).find(|column| {
+                        occupied_until
+                            .get(*column)
+                            .is_some_and(|until| *until > group_row_index)
+                    });
+                    if let Some(column) = conflict {
+                        next_column = column + 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                let end = next_column + colspan;
+                occupied_until.resize(occupied_until.len().max(end), 0);
+                occupied_until[next_column..end].fill(group_row_index + rowspan);
+                grid_cells.push(TextGridCell {
+                    start: next_column,
+                    colspan,
+                    text: display_cell_text(cell),
+                    header: cell.value().name() == "th",
+                });
+                width = width.max(end);
+                next_column = end;
+            }
+            rows.push(TextGridRow { cells: grid_cells });
+            group_row_index += 1;
+        }
+
+        Ok(Self { width, rows })
+    }
+
+    fn render(&self, max_width: usize) -> String {
+        if self.width == 0 || self.rows.is_empty() {
+            return String::new();
+        }
+
+        let header_rows = self.header_row_count();
+        let numeric_columns = self.numeric_columns(header_rows);
+        let widths = self.column_widths(max_width, &numeric_columns);
+        let mut output = Vec::new();
+
+        for (row_index, row) in self.rows.iter().enumerate() {
+            output.extend(render_text_row(
+                row,
+                &widths,
+                &numeric_columns,
+                row_index < header_rows,
+            ));
+            if header_rows > 0 && row_index + 1 == header_rows {
+                output.push(
+                    widths
+                        .iter()
+                        .map(|width| "-".repeat(*width))
+                        .collect::<Vec<_>>()
+                        .join(&" ".repeat(TEXT_TABLE_GUTTER)),
+                );
+            }
+        }
+
+        let mut rendered = output.join("\n");
+        rendered.push('\n');
+        rendered
+    }
+
+    fn header_row_count(&self) -> usize {
+        self.rows
+            .iter()
+            .take_while(|row| {
+                let has_header_cell = row.cells.iter().any(|cell| cell.header);
+                let first_column_is_empty = row
+                    .cells
+                    .iter()
+                    .find(|cell| cell.start == 0)
+                    .is_none_or(|cell| cell.text.is_empty());
+                let is_full_width_heading = self.width > 1
+                    && row.cells.len() == 1
+                    && row.cells[0].start == 0
+                    && row.cells[0].colspan == self.width;
+                has_header_cell || first_column_is_empty || is_full_width_heading
+            })
+            .count()
+    }
+
+    fn numeric_columns(&self, header_rows: usize) -> Vec<bool> {
+        (0..self.width)
+            .map(|column| {
+                let values = self
+                    .rows
+                    .iter()
+                    .skip(header_rows)
+                    .flat_map(|row| &row.cells)
+                    .filter(|cell| cell.colspan == 1 && cell.start == column)
+                    .map(|cell| cell.text.as_str())
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>();
+                !values.is_empty() && values.iter().all(|value| is_numeric_text(value))
+            })
+            .collect()
+    }
+
+    fn column_widths(&self, max_width: usize, numeric_columns: &[bool]) -> Vec<usize> {
+        let mut preferred = vec![1; self.width];
+        let mut minimum = vec![1; self.width];
+
+        for cell in self.rows.iter().flat_map(|row| &row.cells) {
+            if cell.colspan != 1 {
+                continue;
+            }
+            let length = text_width(&cell.text).max(1);
+            preferred[cell.start] = preferred[cell.start].max(length);
+            let minimum_width = if numeric_columns[cell.start] && is_numeric_text(&cell.text) {
+                length
+            } else {
+                longest_word_width(&cell.text).max(1)
+            };
+            minimum[cell.start] = minimum[cell.start].max(minimum_width);
+        }
+
+        for cell in self.rows.iter().flat_map(|row| &row.cells) {
+            if cell.colspan == 1 || cell.text.is_empty() {
+                continue;
+            }
+            let available = preferred[cell.start..cell.start + cell.colspan]
+                .iter()
+                .sum::<usize>()
+                + TEXT_TABLE_GUTTER * (cell.colspan - 1);
+            let needed = text_width(&cell.text);
+            let mut deficit = needed.saturating_sub(available);
+            let mut column = cell.start;
+            while deficit > 0 {
+                preferred[column] += 1;
+                deficit -= 1;
+                column += 1;
+                if column == cell.start + cell.colspan {
+                    column = cell.start;
+                }
+            }
+        }
+
+        for column in 0..self.width {
+            if numeric_columns[column] {
+                preferred[column] = preferred[column]
+                    .min(TEXT_TABLE_NUMERIC_MAX_WIDTH)
+                    .max(minimum[column]);
+            }
+        }
+
+        let gutters = TEXT_TABLE_GUTTER * self.width.saturating_sub(1);
+        while preferred.iter().sum::<usize>() + gutters > max_width {
+            let Some(column) = (0..self.width)
+                .filter(|column| preferred[*column] > minimum[*column])
+                .max_by_key(|column| preferred[*column] - minimum[*column])
+            else {
+                break;
+            };
+            preferred[column] -= 1;
+        }
+        preferred
+    }
+}
+
+fn display_cell_text(cell: ElementRef<'_>) -> String {
+    let mut text = String::new();
+    let mut pending_space = false;
+    append_visible_text(cell, &mut text, &mut pending_space);
+    let text = text.trim().to_owned();
+    if text == "$—" {
+        "—".to_owned()
+    } else {
+        text
+    }
+}
+
+fn append_visible_text(node: ElementRef<'_>, output: &mut String, pending_space: &mut bool) {
+    for child in node.children() {
+        match child.value() {
+            Node::Text(text) => {
+                let raw = text.text.as_ref();
+                let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+                if normalized.is_empty() {
+                    if raw.chars().any(char::is_whitespace) {
+                        *pending_space = !output.is_empty();
+                    }
+                    continue;
+                }
+                if *pending_space && !output.is_empty() {
+                    output.push(' ');
+                }
+                output.push_str(&normalized);
+                *pending_space = raw.chars().last().is_some_and(char::is_whitespace);
+            }
+            Node::Element(element) if element.name() == "br" => {
+                *pending_space = !output.is_empty();
+            }
+            Node::Element(element) => {
+                let block = matches!(element.name(), "div" | "p");
+                if block {
+                    *pending_space = !output.is_empty();
+                }
+                if let Some(child) = ElementRef::wrap(child) {
+                    append_visible_text(child, output, pending_space);
+                }
+                if block {
+                    *pending_space = !output.is_empty();
+                }
+            }
+            Node::Document | Node::Fragment => {
+                if let Some(child) = ElementRef::wrap(child) {
+                    append_visible_text(child, output, pending_space);
+                }
+            }
+            Node::Comment(_) | Node::Doctype(_) | Node::ProcessingInstruction(_) => {}
+        }
+    }
+}
+
+fn render_text_row(
+    row: &TextGridRow,
+    widths: &[usize],
+    numeric_columns: &[bool],
+    header_row: bool,
+) -> Vec<String> {
+    let mut rendered_cells = Vec::<(usize, Vec<String>, bool)>::new();
+    let mut cursor = 0;
+    for cell in &row.cells {
+        while cursor < cell.start {
+            rendered_cells.push((widths[cursor], vec![String::new()], false));
+            cursor += 1;
+        }
+        let width = widths[cell.start..cell.start + cell.colspan]
+            .iter()
+            .sum::<usize>()
+            + TEXT_TABLE_GUTTER * cell.colspan.saturating_sub(1);
+        let right_aligned = cell.colspan == 1 && numeric_columns[cell.start] && !header_row;
+        let continuation_indent = usize::from(cell.start == 0 && !header_row && width > 2) * 2;
+        rendered_cells.push((
+            width,
+            wrap_text(&cell.text, width, continuation_indent),
+            right_aligned,
+        ));
+        cursor = cell.start + cell.colspan;
+    }
+    while cursor < widths.len() {
+        rendered_cells.push((widths[cursor], vec![String::new()], false));
+        cursor += 1;
+    }
+
+    let height = rendered_cells
+        .iter()
+        .map(|(_, lines, _)| lines.len())
+        .max()
+        .unwrap_or(1);
+    (0..height)
+        .map(|line_index| {
+            rendered_cells
+                .iter()
+                .map(|(width, lines, right_aligned)| {
+                    let line = lines.get(line_index).map_or("", String::as_str);
+                    pad_text(line, *width, *right_aligned)
+                })
+                .collect::<Vec<_>>()
+                .join(&" ".repeat(TEXT_TABLE_GUTTER))
+                .trim_end()
+                .to_owned()
+        })
+        .collect()
+}
+
+fn wrap_text(text: &str, width: usize, continuation_indent: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let separator = usize::from(!line.is_empty());
+        let line_width = if lines.is_empty() {
+            width
+        } else {
+            width - continuation_indent
+        };
+        if !line.is_empty() && text_width(&line) + separator + text_width(word) > line_width {
+            lines.push(line);
+            line = String::new();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    for line in lines.iter_mut().skip(1) {
+        line.insert_str(0, &" ".repeat(continuation_indent));
+    }
+    lines
+}
+
+fn pad_text(text: &str, width: usize, right_aligned: bool) -> String {
+    let padding = width.saturating_sub(text_width(text));
+    if right_aligned {
+        format!("{}{}", " ".repeat(padding), text)
+    } else {
+        format!("{}{}", text, " ".repeat(padding))
+    }
+}
+
+fn text_width(text: &str) -> usize {
+    text.chars().count()
+}
+
+fn longest_word_width(text: &str) -> usize {
+    text.split_whitespace().map(text_width).max().unwrap_or(0)
+}
+
+fn is_numeric_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().all(|character| {
+            character.is_ascii_digit()
+                || matches!(
+                    character,
+                    '$' | ',' | '.' | '(' | ')' | '%' | '+' | '-' | '—' | '–' | ' ' | '\u{a0}'
+                )
+        })
 }
 
 fn clean_once(table_html: &str) -> Result<String> {
@@ -893,6 +1291,88 @@ mod tests {
                 "</table>"
             )
         );
+    }
+
+    #[test]
+    fn renders_a_borderless_table_with_headers_and_aligned_numbers() {
+        let input = concat!(
+            "<table>",
+            "<tr><td></td><td colspan=\"3\">Three Months Ended</td>",
+            "<td colspan=\"2\"><div>Period from January 23, 2015</div><div>through</div></td></tr>",
+            "<tr><td></td><td colspan=\"3\">March 31, 2016</td><td colspan=\"2\">March 31, 2015</td></tr>",
+            "<tr><td>Net loss</td><td>$</td><td>(150,000</td><td>)</td><td>$</td><td>—</td></tr>",
+            "<tr><td>Add:</td><td colspan=\"3\"></td><td colspan=\"2\"></td></tr>",
+            "<tr><td>Depreciation and amortization</td><td colspan=\"2\">—</td><td><br></td><td colspan=\"2\">—</td></tr>",
+            "</table>"
+        );
+
+        let rendered = render_table_text(input).unwrap();
+        let lines = rendered.lines().collect::<Vec<_>>();
+        let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+        let rule_index = lines
+            .iter()
+            .position(|line| {
+                line.contains('-') && line.chars().all(|character| matches!(character, '-' | ' '))
+            })
+            .unwrap();
+        let net_loss = lines
+            .iter()
+            .find(|line| line.starts_with("Net loss"))
+            .unwrap();
+        let depreciation = lines
+            .iter()
+            .find(|line| line.starts_with("Depreciation"))
+            .unwrap();
+
+        assert!(rendered.contains("Three Months Ended"));
+        assert!(normalized.contains("Period from January 23, 2015 through"));
+        assert!(rendered.contains("March 31, 2016"));
+        assert!(rendered.contains("March 31, 2015"));
+        assert!(rule_index > 0);
+        assert_eq!(
+            net_loss.split_whitespace().collect::<Vec<_>>(),
+            ["Net", "loss", "$(150,000)", "—"]
+        );
+        assert!(lines.contains(&"Add:"));
+        assert_eq!(
+            depreciation.split_whitespace().collect::<Vec<_>>(),
+            ["Depreciation", "and", "amortization", "—", "—"]
+        );
+        assert!(lines.iter().all(|line| !line.ends_with(' ')));
+        assert!(
+            lines
+                .iter()
+                .all(|line| text_width(line) <= TEXT_TABLE_MAX_WIDTH)
+        );
+    }
+
+    #[test]
+    fn renders_a_one_row_bullet_layout_as_a_table() {
+        let input =
+            "<table><tr><td><p>·</p></td><td><p>FFO was $11.6 million.</p></td></tr></table>";
+
+        assert_eq!(
+            render_table_text(input).unwrap(),
+            "·  FFO was $11.6 million.\n"
+        );
+    }
+
+    #[test]
+    fn wraps_long_table_text_to_the_output_width() {
+        let prose =
+            "This is a deliberately long sentence with repeated financial disclosure words. "
+                .repeat(3);
+        let input = format!("<table><tr><td>•</td><td>{prose}</td></tr></table>");
+
+        let rendered = render_table_text(&input).unwrap();
+
+        assert!(rendered.lines().count() > 1);
+        assert!(
+            rendered
+                .lines()
+                .all(|line| text_width(line) <= TEXT_TABLE_MAX_WIDTH)
+        );
+        assert!(rendered.lines().skip(1).all(|line| line.starts_with("   ")));
     }
 
     #[test]

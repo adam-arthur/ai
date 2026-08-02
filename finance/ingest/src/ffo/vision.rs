@@ -9,7 +9,7 @@ use once_cell::sync::Lazy;
 use scraper::{Html, Selector};
 use tokio::sync::Semaphore;
 
-use super::table_html::clean_table_html;
+use super::table_html::render_table_text;
 
 const MAX_CONTEXT_ITEMS: usize = 4;
 const MAX_CONTEXT_LENGTH: usize = 400;
@@ -123,13 +123,13 @@ fn candidate_image_name(source_document: &str, index: usize) -> String {
 }
 
 fn candidate_table_name(source_document: &str, index: usize) -> String {
-    format!("{source_document}-{index}.html")
+    format!("{source_document}-{index}.txt")
 }
 
 fn write_candidate_table(path: &Path, table_html: &str) -> Result<()> {
-    let cleaned = clean_table_html(table_html)
-        .with_context(|| format!("failed to clean table HTML for {}", path.display()))?;
-    fs::write(path, cleaned).with_context(|| format!("failed to write {}", path.display()))
+    let rendered = render_table_text(table_html)
+        .with_context(|| format!("failed to render table for {}", path.display()))?;
+    fs::write(path, rendered).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn publish_staging_dir(staging_dir: &Path, output_dir: &Path) -> Result<()> {
@@ -498,36 +498,24 @@ mod tests {
         );
         assert_eq!(
             candidate_table_name("q42025supplemental.htm", 2),
-            "q42025supplemental.htm-2.html"
+            "q42025supplemental.htm-2.txt"
         );
     }
 
     #[test]
-    fn writes_clean_candidate_table_html_without_the_render_wrapper() {
+    fn writes_compact_candidate_table_text() {
         let test_dir = std::env::temp_dir().join(format!(
             "ffo-table-test-{}-{}",
             std::process::id(),
             STAGING_ID.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&test_dir).unwrap();
-        let table_path = test_dir.join("filing.htm-1.html");
+        let table_path = test_dir.join("filing.htm-1.txt");
         let table_html = r#"<table style="width: 100%"><tr><td><font face="Arial">FFO</font></td><td align="right">(42)</td></tr></table>"#;
 
         write_candidate_table(&table_path, table_html).unwrap();
 
-        assert_eq!(
-            fs::read_to_string(&table_path).unwrap(),
-            concat!(
-                "<table>\n",
-                "  <tbody>\n",
-                "    <tr>\n",
-                "      <td>FFO</td>\n",
-                "      <td>(42)</td>\n",
-                "    </tr>\n",
-                "  </tbody>\n",
-                "</table>"
-            )
-        );
+        assert_eq!(fs::read_to_string(&table_path).unwrap(), "FFO  (42)\n");
         fs::remove_dir_all(test_dir).unwrap();
     }
 
