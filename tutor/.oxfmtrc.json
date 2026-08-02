@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "tabWidth": 2,
+  "useTabs": false,
+  "semi": false,
+  "arrowParens": "avoid",
+  "singleQuote": true,
+  "printWidth": 140,
+  "sortImports": {
+    "newlinesBetween": true,
+    "customGroups": [
+      {
+        "groupName": "local-packages",
+        "elementNamePattern": ["@ai", "@ai/**"]
+      }
+    ],
+    "groups": [
+      ["type-builtin", "value-builtin", "type-external", "value-external"],
+      "local-packages",
+      ["type-internal", "value-internal"],
+      ["type-parent", "value-parent", "type-sibling", "value-sibling", "type-index", "value-index"],
+      "unknown"
+    ]
+  }
+}

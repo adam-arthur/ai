@@ -1,0 +1,27 @@
+{
+  "name": "ai",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "format": "oxfmt --write .",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "test": "npm --workspaces --if-present test",
+    "workspace:check": "npm --workspaces --if-present run check",
+    "check": "npm run format && npm run lint:fix && npm run lint && npm run typecheck && npm run workspace:check && npm test"
+  },
+  "devDependencies": {
+    "eslint-plugin-import": "^2.32.0",
+    "oxfmt": "^0.55.0",
+    "oxlint": "^1.70.0",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=24.12.0"
+  }
+}

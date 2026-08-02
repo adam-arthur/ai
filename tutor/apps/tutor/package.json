@@ -1,0 +1,25 @@
+{
+  "name": "@ai/tutor",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#tutor/*": "./*"
+  },
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "dependencies": {
+    "@ai/browser-audio": "*",
+    "@ai/language-tutor": "*",
+    "@ricky0123/vad-web": "^0.0.30",
+    "onnxruntime-web": "^1.26.0",
+    "svelte": "^5.38.10"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.2",
+    "svelte-check": "^4.3.1",
+    "vite": "^7.1.5"
+  }
+}

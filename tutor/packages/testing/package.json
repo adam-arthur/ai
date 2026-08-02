@@ -1,0 +1,15 @@
+{
+  "name": "@ai/testing",
+  "private": true,
+  "bin": {
+    "ai-test": "./source-tests/runSourceTestsCli.ts"
+  },
+  "type": "module",
+  "imports": {
+    "#testing/*": "./*"
+  },
+  "exports": "./index.ts",
+  "scripts": {
+    "test": "node ./source-tests/runSourceTestsCli.ts"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@ai/llm",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#llm/*": "./*"
+  },
+  "exports": "./index.ts",
+  "scripts": {
+    "test": "ai-test",
+    "smoke": "node scripts/smokeTest.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^2.8.0",
+    "openai": "^6.43.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@ai/testing": "*"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@ai/voice-server",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#voice-server/*": "./*"
+  },
+  "exports": {
+    ".": "./index.ts",
+    "./*": "./*"
+  },
+  "dependencies": {
+    "@ai/llm": "*"
+  }
+}

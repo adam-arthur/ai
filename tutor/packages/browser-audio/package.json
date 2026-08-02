@@ -1,0 +1,16 @@
+{
+  "name": "@ai/browser-audio",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#browser-audio/*": "./*"
+  },
+  "exports": {
+    ".": "./index.ts",
+    "./*": "./*"
+  },
+  "dependencies": {
+    "@ricky0123/vad-web": "^0.0.30",
+    "onnxruntime-web": "^1.26.0"
+  }
+}
