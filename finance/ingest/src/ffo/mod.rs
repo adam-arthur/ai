@@ -5,7 +5,7 @@
 //! the consumer-facing model.
 
 use std::{
-    collections::BTreeSet, fs, path::{Path, PathBuf}
+    collections::{BTreeMap, BTreeSet}, fs, path::{Path, PathBuf}
 };
 
 use anyhow::{Context, Result};
@@ -50,8 +50,9 @@ pub async fn fetch_reit_ffo_sources_batch(
 ///
 /// Raw documents are archived byte-for-byte under
 /// `data_dir/sec/filings/<symbol>/<filing-year>/<accession>/<SEC-filename>`. Derived candidate
-/// tables live separately under `data_dir/ffo/derived`. Documents examined and found not to
-/// contain FFO material are listed by `<accession>/<SEC-filename>` in a year-sharded JSON array.
+/// tables live under `data_dir/ffo/derived/<symbol>/<report-quarter>/tables`. Documents examined
+/// and found not to contain FFO material are listed by `<accession>/<SEC-filename>` in a
+/// year-sharded JSON array.
 #[allow(dead_code)]
 pub async fn fetch_reit_ffo_data(
     symbol: &str,
@@ -62,6 +63,8 @@ pub async fn fetch_reit_ffo_data(
     let data_dir = data_dir.as_ref();
     let filings = discovery::discover_reit_ffo_filings(cik).await?;
     let mut documents = Vec::new();
+    let mut candidate_sources_by_period =
+        BTreeMap::<String, Vec<(PathBuf, Option<String>, Vec<u8>)>>::new();
     for filing in filings {
         let accession = filing.filing.accession_number.clone();
         let filing_year = filing_year(&filing.filing)?;
@@ -109,30 +112,20 @@ pub async fn fetch_reit_ffo_data(
         }
 
         let report_period = filing_calendar_quarter(&filing.filing)?;
-        let derived_dir = derived_filing_dir(data_dir, symbol, &report_period, &accession);
-        if !derived_dir.join("tables").is_dir() {
-            fs::create_dir_all(&derived_dir)
-                .with_context(|| format!("failed to create {}", derived_dir.display()))?;
-            let candidate_sources = fetched_documents
-                .iter()
-                .map(|(source, bytes, content_type)| {
-                    (
-                        raw_dir.join(source_file_name(&source.url)),
-                        content_type.clone(),
-                        bytes.clone(),
-                    )
-                })
-                .collect();
-            let table_count =
-                candidate_tables::ensure_candidate_tables(&derived_dir, candidate_sources)
-                    .with_context(|| {
-                        format!("FFO table extraction failed for {}", derived_dir.display())
-                    })?;
-            log::debug!(
-                "FFO - cached {table_count} candidate table(s) in {}",
-                derived_dir.join("tables").display()
+        candidate_sources_by_period
+            .entry(report_period)
+            .or_default()
+            .extend(
+                fetched_documents
+                    .iter()
+                    .map(|(source, bytes, content_type)| {
+                        (
+                            raw_dir.join(source_file_name(&source.url)),
+                            content_type.clone(),
+                            bytes.clone(),
+                        )
+                    }),
             );
-        }
 
         // Value extraction will be supplied by the future LLM pipeline. Keep each relevant SEC
         // document in canonicalization input, but do not publish inferred values yet.
@@ -142,6 +135,24 @@ pub async fn fetch_reit_ffo_data(
                 values: Vec::new(),
             }
         }));
+    }
+
+    for (report_period, candidate_sources) in candidate_sources_by_period {
+        let derived_dir = derived_quarter_dir(data_dir, symbol, &report_period);
+        if derived_dir.join("tables").is_dir() {
+            continue;
+        }
+        fs::create_dir_all(&derived_dir)
+            .with_context(|| format!("failed to create {}", derived_dir.display()))?;
+        let table_count =
+            candidate_tables::ensure_candidate_tables(&derived_dir, candidate_sources)
+                .with_context(|| {
+                    format!("FFO table extraction failed for {}", derived_dir.display())
+                })?;
+        log::debug!(
+            "FFO - cached {table_count} candidate table(s) in {}",
+            derived_dir.join("tables").display()
+        );
     }
 
     Ok(canonical::canonicalize(
@@ -194,18 +205,12 @@ fn skipped_files_path(data_dir: &Path, symbol: &str, filing_year: &str) -> PathB
         .join(format!("{filing_year}.json"))
 }
 
-fn derived_filing_dir(
-    data_dir: &Path,
-    symbol: &str,
-    report_period: &str,
-    accession: &str,
-) -> PathBuf {
+fn derived_quarter_dir(data_dir: &Path, symbol: &str, report_period: &str) -> PathBuf {
     data_dir
         .join("ffo")
         .join("derived")
         .join(symbol)
         .join(report_period)
-        .join(accession)
 }
 
 fn read_skipped_files(path: &Path) -> Result<BTreeSet<String>> {
@@ -530,8 +535,8 @@ mod tests {
             Path::new("data/sec/cache/VICI/2026.json")
         );
         assert_eq!(
-            derived_filing_dir(data_dir, "VICI", "2025-q4", accession),
-            Path::new("data/ffo/derived/VICI/2025-q4/0000123-26-000001")
+            derived_quarter_dir(data_dir, "VICI", "2025-q4"),
+            Path::new("data/ffo/derived/VICI/2025-q4")
         );
         assert_eq!(
             skipped_file_key(accession, "earnings.htm"),
