@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use ego_tree::NodeRef;
+use ego_tree::{NodeId, NodeRef};
 use scraper::{ElementRef, Html, Node, Selector};
 
 const ALLOWED_ELEMENTS: &[&str] = &[
@@ -51,11 +51,15 @@ pub(super) fn clean_table_html(table_html: &str) -> Result<String> {
 fn clean_once(table_html: &str) -> Result<String> {
     let mut document = Html::parse_fragment(table_html);
     validate(&document)?;
+
+    remove_visually_empty_rows(&mut document);
+    remove_fully_empty_columns(&mut document);
     let before = semantic_projection(&document)?;
 
     normalize_nonbreaking_spaces(&mut document);
     remove_non_data_attributes(&mut document);
     unwrap_fonts(&mut document);
+    unwrap_redundant_cell_wrappers(&mut document);
     empty_whitespace_only_cells(&mut document);
     remove_structural_whitespace(&mut document);
 
@@ -346,6 +350,274 @@ fn unwrap_fonts(document: &mut Html) {
     }
 }
 
+fn unwrap_redundant_cell_wrappers(document: &mut Html) {
+    let wrapper_ids = document
+        .tree
+        .nodes()
+        .filter(|node| is_redundant_cell_wrapper(*node))
+        .map(|node| node.id())
+        .collect::<Vec<_>>();
+
+    for wrapper_id in wrapper_ids {
+        let child_ids = document
+            .tree
+            .get(wrapper_id)
+            .expect("cell wrapper remains in tree")
+            .children()
+            .map(|child| child.id())
+            .collect::<Vec<_>>();
+        for child_id in child_ids {
+            document
+                .tree
+                .get_mut(wrapper_id)
+                .expect("cell wrapper remains in tree")
+                .insert_id_before(child_id);
+        }
+        document
+            .tree
+            .get_mut(wrapper_id)
+            .expect("cell wrapper remains in tree")
+            .detach();
+    }
+}
+
+fn is_redundant_cell_wrapper(node: NodeRef<'_, Node>) -> bool {
+    node.value()
+        .as_element()
+        .is_some_and(|element| matches!(element.name(), "div" | "p"))
+        && node.parent().is_some_and(|parent| {
+            parent
+                .value()
+                .as_element()
+                .is_some_and(|element| matches!(element.name(), "td" | "th"))
+                && parent.children().count() == 1
+        })
+}
+
+fn remove_visually_empty_rows(document: &mut Html) {
+    if document.tree.nodes().any(|node| {
+        node.value().as_element().is_some_and(|element| {
+            matches!(element.name(), "td" | "th") && element.attr("rowspan").is_some()
+        })
+    }) {
+        return;
+    }
+
+    let row_ids = document
+        .tree
+        .nodes()
+        .filter(|node| is_visually_empty_row(*node))
+        .map(|node| node.id())
+        .collect::<Vec<_>>();
+
+    for row_id in row_ids {
+        document
+            .tree
+            .get_mut(row_id)
+            .expect("empty row remains in tree")
+            .detach();
+    }
+}
+
+#[derive(Debug)]
+struct GridCell {
+    id: NodeId,
+    start: usize,
+    colspan: usize,
+    has_content: bool,
+}
+
+fn remove_fully_empty_columns(document: &mut Html) {
+    // Column descriptors need corresponding contraction logic of their own.
+    // Leave those comparatively rare tables unchanged for now.
+    if document.tree.nodes().any(|node| {
+        node.value()
+            .as_element()
+            .is_some_and(|element| matches!(element.name(), "col" | "colgroup"))
+    }) {
+        return;
+    }
+
+    while let Some((width, cells)) = resolve_grid(document) {
+        let mut has_empty_single_cell = vec![false; width];
+        let mut has_nonempty_single_cell = vec![false; width];
+        for cell in &cells {
+            if cell.colspan != 1 {
+                continue;
+            }
+            if cell.has_content {
+                has_nonempty_single_cell[cell.start] = true;
+            } else {
+                has_empty_single_cell[cell.start] = true;
+            }
+        }
+
+        let mut removable = (0..width)
+            .map(|column| has_empty_single_cell[column] && !has_nonempty_single_cell[column])
+            .collect::<Vec<_>>();
+
+        // A nonempty spanning cell must retain at least one coordinate. If its
+        // entire range is otherwise removable, the range is structurally
+        // ambiguous rather than provably empty, so preserve all of it.
+        for cell in &cells {
+            if cell.has_content
+                && (cell.start..cell.start + cell.colspan).all(|column| removable[column])
+            {
+                removable[cell.start..cell.start + cell.colspan].fill(false);
+            }
+        }
+
+        if !removable.iter().any(|remove| *remove) {
+            break;
+        }
+
+        for cell in cells {
+            let removed = removable[cell.start..cell.start + cell.colspan]
+                .iter()
+                .filter(|remove| **remove)
+                .count();
+            if removed == 0 {
+                continue;
+            }
+
+            let new_colspan = cell.colspan - removed;
+            if new_colspan == 0 {
+                debug_assert!(!cell.has_content);
+                document
+                    .tree
+                    .get_mut(cell.id)
+                    .expect("empty cell remains in tree")
+                    .detach();
+            } else {
+                set_colspan(document, cell.id, new_colspan);
+            }
+        }
+    }
+}
+
+fn resolve_grid(document: &Html) -> Option<(usize, Vec<GridCell>)> {
+    let table = only_table(document).ok()?;
+    let row_selector = Selector::parse("tr").expect("valid row selector");
+    let mut occupied_until = Vec::<usize>::new();
+    let mut cells = Vec::new();
+    let mut width = 0;
+    let mut current_group = None;
+    let mut row_index = 0;
+
+    for row in table.select(&row_selector) {
+        let group = row.ancestors().find_map(|ancestor| {
+            ancestor.value().as_element().and_then(|element| {
+                matches!(element.name(), "thead" | "tbody" | "tfoot").then(|| ancestor.id())
+            })
+        });
+        if group != current_group {
+            occupied_until.clear();
+            current_group = group;
+            row_index = 0;
+        }
+
+        let mut next_column = 0;
+        for cell in row
+            .children()
+            .filter_map(ElementRef::wrap)
+            .filter(|cell| matches!(cell.value().name(), "td" | "th"))
+        {
+            let colspan = parse_span(cell.value().attr("colspan"))?;
+            let rowspan = parse_span(cell.value().attr("rowspan"))?;
+
+            loop {
+                while occupied_until
+                    .get(next_column)
+                    .is_some_and(|until| *until > row_index)
+                {
+                    next_column += 1;
+                }
+                let conflict = (next_column..next_column + colspan).find(|column| {
+                    occupied_until
+                        .get(*column)
+                        .is_some_and(|until| *until > row_index)
+                });
+                if let Some(column) = conflict {
+                    next_column = column + 1;
+                } else {
+                    break;
+                }
+            }
+
+            let end = next_column + colspan;
+            occupied_until.resize(occupied_until.len().max(end), 0);
+            occupied_until[next_column..end].fill(row_index + rowspan);
+            cells.push(GridCell {
+                id: cell.id(),
+                start: next_column,
+                colspan,
+                has_content: has_meaningful_content(cell),
+            });
+            width = width.max(end);
+            next_column = end;
+        }
+        row_index += 1;
+    }
+
+    Some((width, cells))
+}
+
+fn parse_span(attribute: Option<&str>) -> Option<usize> {
+    match attribute {
+        None => Some(1),
+        Some(value) => value.parse().ok().filter(|span| *span > 0),
+    }
+}
+
+fn has_meaningful_content(cell: ElementRef<'_>) -> bool {
+    cell.descendants()
+        .any(|descendant| match descendant.value() {
+            Node::Text(text) => !text.trim().is_empty(),
+            Node::Comment(_) => true,
+            Node::Element(element) => element.attrs().any(|(attribute, _)| {
+                PRESERVED_ATTRIBUTES.contains(&attribute)
+                    && !matches!(attribute, "colspan" | "rowspan")
+            }),
+            _ => false,
+        })
+}
+
+fn set_colspan(document: &mut Html, cell_id: NodeId, colspan: usize) {
+    let mut node = document
+        .tree
+        .get_mut(cell_id)
+        .expect("contracted cell remains in tree");
+    let Node::Element(element) = node.value() else {
+        unreachable!("grid cells are elements");
+    };
+
+    if colspan == 1 {
+        element
+            .attrs
+            .retain(|(attribute, _)| attribute.local.as_ref() != "colspan");
+    } else {
+        let (_, value) = element
+            .attrs
+            .iter_mut()
+            .find(|(attribute, _)| attribute.local.as_ref() == "colspan")
+            .expect("a contracted multi-column cell already has colspan");
+        *value = colspan.to_string().into();
+    }
+}
+
+fn is_visually_empty_row(node: NodeRef<'_, Node>) -> bool {
+    node.value()
+        .as_element()
+        .is_some_and(|element| element.name() == "tr")
+        && node
+            .descendants()
+            .all(|descendant| match descendant.value() {
+                Node::Text(text) => text.trim().is_empty(),
+                Node::Comment(_) => false,
+                _ => true,
+            })
+}
+
 fn remove_structural_whitespace(document: &mut Html) {
     let whitespace_ids = document
         .tree
@@ -401,7 +673,7 @@ fn semantic_projection(document: &Html) -> Result<Vec<SemanticToken>> {
 
 fn project_node(node: NodeRef<'_, Node>, projection: &mut Vec<SemanticToken>) {
     match node.value() {
-        Node::Element(element) if element.name() == "font" => {
+        Node::Element(element) if element.name() == "font" || is_redundant_cell_wrapper(node) => {
             for child in node.children() {
                 project_node(child, projection);
             }
@@ -490,7 +762,6 @@ mod tests {
                 "      <td>$</td>\n",
                 "      <td> (79,104</td>\n",
                 "      <td>)</td>\n",
-                "      <td></td>\n",
                 "    </tr>\n",
                 "  </tbody>\n",
                 "</table>"
@@ -514,6 +785,166 @@ mod tests {
                 "</table>"
             )
         );
+    }
+
+    #[test]
+    fn unwraps_a_cell_content_wrapper() {
+        let input = "<table><tr><td><div>Net income <sup>(1)</sup></div></td><th><p>2025</p></th></tr></table>";
+
+        assert_eq!(
+            clean_table_html(input).unwrap(),
+            concat!(
+                "<table>\n",
+                "  <tbody>\n",
+                "    <tr>\n",
+                "      <td>Net income <sup>(1)</sup></td>\n",
+                "      <th>2025</th>\n",
+                "    </tr>\n",
+                "  </tbody>\n",
+                "</table>"
+            )
+        );
+    }
+
+    #[test]
+    fn preserves_multiple_cell_content_blocks() {
+        let input = "<table><tr><td><div>Date of inception</div><div>through March 31</div></td></tr></table>";
+
+        assert!(
+            clean_table_html(input)
+                .unwrap()
+                .contains("<td><div>Date of inception</div><div>through March 31</div></td>")
+        );
+    }
+
+    #[test]
+    fn removes_rows_without_visible_content() {
+        let input = concat!(
+            "<table>",
+            "<tr><td colspan=\"2\"></td></tr>",
+            "<tr><td><div>&nbsp;</div></td><td><br></td></tr>",
+            "<tr><td>FFO</td><td><sup>(1)</sup></td></tr>",
+            "</table>"
+        );
+
+        assert_eq!(
+            clean_table_html(input).unwrap(),
+            concat!(
+                "<table>\n",
+                "  <tbody>\n",
+                "    <tr>\n",
+                "      <td>FFO</td>\n",
+                "      <td><sup>(1)</sup></td>\n",
+                "    </tr>\n",
+                "  </tbody>\n",
+                "</table>"
+            )
+        );
+    }
+
+    #[test]
+    fn preserves_a_row_containing_a_comment() {
+        let input = "<table><tr><td><!-- source note --></td></tr></table>";
+
+        assert!(
+            clean_table_html(input)
+                .unwrap()
+                .contains("<td><!-- source note --></td>")
+        );
+    }
+
+    #[test]
+    fn removes_empty_columns_and_contracts_crossing_headers() {
+        let input = concat!(
+            "<table>",
+            "<tr><td></td><td colspan=\"4\">Years ended</td></tr>",
+            "<tr><td>FFO</td><td></td><td>2025</td><td><br></td><td>2024</td></tr>",
+            "<tr><td>Amount</td><td></td><td>$42</td><td></td><td>$38</td></tr>",
+            "</table>"
+        );
+
+        assert_eq!(
+            clean_table_html(input).unwrap(),
+            concat!(
+                "<table>\n",
+                "  <tbody>\n",
+                "    <tr>\n",
+                "      <td></td>\n",
+                "      <td colspan=\"2\">Years ended</td>\n",
+                "    </tr>\n",
+                "    <tr>\n",
+                "      <td>FFO</td>\n",
+                "      <td>2025</td>\n",
+                "      <td>2024</td>\n",
+                "    </tr>\n",
+                "    <tr>\n",
+                "      <td>Amount</td>\n",
+                "      <td>$42</td>\n",
+                "      <td>$38</td>\n",
+                "    </tr>\n",
+                "  </tbody>\n",
+                "</table>"
+            )
+        );
+    }
+
+    #[test]
+    fn resolves_rowspans_before_removing_an_empty_column() {
+        let input = concat!(
+            "<table>",
+            "<tr><td rowspan=\"2\">FFO</td><td></td><td>2025</td></tr>",
+            "<tr><td></td><td>$42</td></tr>",
+            "</table>"
+        );
+
+        assert_eq!(
+            clean_table_html(input).unwrap(),
+            concat!(
+                "<table>\n",
+                "  <tbody>\n",
+                "    <tr>\n",
+                "      <td rowspan=\"2\">FFO</td>\n",
+                "      <td>2025</td>\n",
+                "    </tr>\n",
+                "    <tr>\n",
+                "      <td>$42</td>\n",
+                "    </tr>\n",
+                "  </tbody>\n",
+                "</table>"
+            )
+        );
+    }
+
+    #[test]
+    fn rowspans_do_not_cross_table_section_boundaries() {
+        let input = concat!(
+            "<table>",
+            "<thead><tr><td rowspan=\"2\">Heading</td><td></td><td>Period</td></tr></thead>",
+            "<tbody><tr><td>FFO</td><td></td><td>$42</td></tr></tbody>",
+            "</table>"
+        );
+
+        let cleaned = clean_table_html(input).unwrap();
+        assert!(cleaned.contains("<td rowspan=\"2\">Heading</td>"));
+        assert!(cleaned.contains("<tr>\n      <td>FFO</td>\n      <td>$42</td>\n    </tr>"));
+    }
+
+    #[test]
+    fn preserves_empty_rows_when_the_table_uses_rowspans() {
+        let input = "<table><tr><td rowspan=\"2\">FFO</td></tr><tr><td></td></tr></table>";
+
+        // The empty cell is a removable column, but the row itself remains so
+        // the rowspan still covers two rows.
+        assert!(clean_table_html(input).unwrap().contains("<tr></tr>"));
+    }
+
+    #[test]
+    fn preserves_columns_when_only_spanning_content_defines_their_shape() {
+        let input = "<table><tr><td colspan=\"2\">FFO reconciliation</td><td>Period</td></tr><tr><td></td><td></td><td>2025</td></tr></table>";
+
+        let cleaned = clean_table_html(input).unwrap();
+        assert!(cleaned.contains("<td colspan=\"2\">FFO reconciliation</td>"));
+        assert_eq!(cleaned.matches("<td></td>").count(), 2);
     }
 
     #[test]
