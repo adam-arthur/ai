@@ -35,7 +35,7 @@ struct CandidateScore {
     matched_terms: Vec<String>,
 }
 
-pub(super) async fn ensure_candidate_images(
+pub(super) async fn ensure_candidate_artifacts(
     quarter_dir: &Path,
     sources: Vec<(PathBuf, Option<String>, Vec<u8>)>,
 ) -> Result<usize> {
@@ -47,21 +47,29 @@ pub(super) async fn ensure_candidate_images(
         .context("FFO image-generation semaphore closed")?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        generate_candidate_images(&quarter_dir, sources)
+        generate_candidate_artifacts(&quarter_dir, sources)
     })
     .await
     .context("FFO image-generation task panicked")?
 }
 
-fn generate_candidate_images(
+fn generate_candidate_artifacts(
     quarter_dir: &Path,
     sources: Vec<(PathBuf, Option<String>, Vec<u8>)>,
 ) -> Result<usize> {
-    let output_dir = quarter_dir.join("vision");
+    let image_output_dir = quarter_dir.join("vision");
+    let table_output_dir = quarter_dir.join("tables");
 
-    let staging_dir = staging_dir(&output_dir)?;
-    fs::create_dir(&staging_dir)
-        .with_context(|| format!("failed to create {}", staging_dir.display()))?;
+    let image_staging_dir = staging_dir(&image_output_dir)?;
+    let table_staging_dir = staging_dir(&table_output_dir)?;
+    fs::create_dir(&image_staging_dir)
+        .with_context(|| format!("failed to create {}", image_staging_dir.display()))?;
+    if let Err(error) = fs::create_dir(&table_staging_dir)
+        .with_context(|| format!("failed to create {}", table_staging_dir.display()))
+    {
+        let _ = fs::remove_dir(&image_staging_dir);
+        return Err(error);
+    }
 
     let result = (|| {
         let mut image_count = 0;
@@ -79,46 +87,73 @@ fn generate_candidate_images(
                 for (offset, candidate) in candidates.into_iter().enumerate() {
                     let index = offset + 1;
                     let image_name = candidate_image_name(&source_document, index);
-                    let image_path = staging_dir.join(&image_name);
+                    let image_path = image_staging_dir.join(&image_name);
+                    let table_path =
+                        table_staging_dir.join(candidate_table_name(&source_document, index));
+                    write_candidate_table(&table_path, &candidate.table_html)?;
                     let evidence_html = evidence_document(&candidate);
-                    render_candidate(chrome, &staging_dir, index, &evidence_html, &image_path)?;
+                    render_candidate(
+                        chrome,
+                        &image_staging_dir,
+                        index,
+                        &evidence_html,
+                        &image_path,
+                    )?;
                     image_count += 1;
                 }
             }
         }
 
-        if output_dir.exists() {
-            let entries = fs::read_dir(&staging_dir)
-                .with_context(|| format!("failed to read {}", staging_dir.display()))?
-                .collect::<std::io::Result<Vec<_>>>()?;
-            for entry in &entries {
-                let destination = output_dir.join(entry.file_name());
-                if destination.exists() {
-                    bail!("FFO vision image already exists: {}", destination.display());
-                }
-            }
-            for entry in entries {
-                let destination = output_dir.join(entry.file_name());
-                fs::rename(entry.path(), &destination)
-                    .with_context(|| format!("failed to write {}", destination.display()))?;
-            }
-            fs::remove_dir(&staging_dir)
-                .with_context(|| format!("failed to remove {}", staging_dir.display()))?;
-        } else {
-            fs::rename(&staging_dir, &output_dir)
-                .with_context(|| format!("failed to replace {}", output_dir.display()))?;
-        }
+        publish_staging_dir(&image_staging_dir, &image_output_dir)?;
+        publish_staging_dir(&table_staging_dir, &table_output_dir)?;
         Ok(image_count)
     })();
 
     if result.is_err() {
-        let _ = fs::remove_dir_all(&staging_dir);
+        let _ = fs::remove_dir_all(&image_staging_dir);
+        let _ = fs::remove_dir_all(&table_staging_dir);
     }
     result
 }
 
 fn candidate_image_name(source_document: &str, index: usize) -> String {
     format!("{source_document}-{index}.png")
+}
+
+fn candidate_table_name(source_document: &str, index: usize) -> String {
+    format!("{source_document}-{index}.html")
+}
+
+fn write_candidate_table(path: &Path, table_html: &str) -> Result<()> {
+    fs::write(path, table_html).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn publish_staging_dir(staging_dir: &Path, output_dir: &Path) -> Result<()> {
+    if output_dir.exists() {
+        let entries = fs::read_dir(staging_dir)
+            .with_context(|| format!("failed to read {}", staging_dir.display()))?
+            .collect::<std::io::Result<Vec<_>>>()?;
+        for entry in &entries {
+            let destination = output_dir.join(entry.file_name());
+            if destination.exists() {
+                bail!(
+                    "FFO candidate artifact already exists: {}",
+                    destination.display()
+                );
+            }
+        }
+        for entry in entries {
+            let destination = output_dir.join(entry.file_name());
+            fs::rename(entry.path(), &destination)
+                .with_context(|| format!("failed to write {}", destination.display()))?;
+        }
+        fs::remove_dir(staging_dir)
+            .with_context(|| format!("failed to remove {}", staging_dir.display()))?;
+    } else {
+        fs::rename(staging_dir, output_dir)
+            .with_context(|| format!("failed to replace {}", output_dir.display()))?;
+    }
+    Ok(())
 }
 
 fn is_pdf(source: &Path, content_type: Option<&str>, bytes: &[u8]) -> bool {
@@ -457,10 +492,31 @@ mod tests {
             candidate_image_name("q42025supplemental.htm", 2),
             "q42025supplemental.htm-2.png"
         );
+        assert_eq!(
+            candidate_table_name("q42025supplemental.htm", 2),
+            "q42025supplemental.htm-2.html"
+        );
     }
 
     #[test]
-    fn vision_directory_accepts_additional_quarter_batches() {
+    fn writes_candidate_table_html_without_the_render_wrapper() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "ffo-table-test-{}-{}",
+            std::process::id(),
+            STAGING_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&test_dir).unwrap();
+        let table_path = test_dir.join("filing.htm-1.html");
+        let table_html = r#"<table style="width: 100%"><tr><td>FFO</td><td>(42)</td></tr></table>"#;
+
+        write_candidate_table(&table_path, table_html).unwrap();
+
+        assert_eq!(fs::read_to_string(&table_path).unwrap(), table_html);
+        fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    #[test]
+    fn artifact_directories_accept_additional_quarter_batches() {
         let test_dir = std::env::temp_dir().join(format!(
             "ffo-vision-test-{}-{}",
             std::process::id(),
@@ -468,9 +524,16 @@ mod tests {
         ));
         fs::create_dir(&test_dir).unwrap();
 
-        assert_eq!(generate_candidate_images(&test_dir, Vec::new()).unwrap(), 0);
+        assert_eq!(
+            generate_candidate_artifacts(&test_dir, Vec::new()).unwrap(),
+            0
+        );
         assert!(test_dir.join("vision").is_dir());
-        assert_eq!(generate_candidate_images(&test_dir, Vec::new()).unwrap(), 0);
+        assert!(test_dir.join("tables").is_dir());
+        assert_eq!(
+            generate_candidate_artifacts(&test_dir, Vec::new()).unwrap(),
+            0
+        );
 
         fs::remove_dir_all(test_dir).unwrap();
     }

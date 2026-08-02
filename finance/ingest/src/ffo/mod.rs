@@ -128,7 +128,8 @@ pub async fn fetch_reit_ffo_data(
             });
         }
 
-        let image_count = match vision::ensure_candidate_images(&document_dir, vision_sources).await
+        let image_count = match vision::ensure_candidate_artifacts(&document_dir, vision_sources)
+            .await
         {
             Ok(count) => count,
             Err(error) => {
@@ -150,8 +151,9 @@ pub async fn fetch_reit_ffo_data(
             }
         };
         log::debug!(
-            "FFO vision - cached {image_count} candidate image(s) in {}",
-            document_dir.join("vision").display()
+            "FFO vision - cached {image_count} candidate image(s) in {} and raw table(s) in {}",
+            document_dir.join("vision").display(),
+            document_dir.join("tables").display()
         );
         for accession in accessions {
             processed_accessions.insert(accession);
