@@ -1,10 +1,11 @@
 use anyhow::{Context, Result, bail};
 use ego_tree::{NodeId, NodeRef};
-use scraper::{ElementRef, Html, Node, Selector};
+use scraper::{ElementRef, Html, Node, Selector, node::Text};
 
 const ALLOWED_ELEMENTS: &[&str] = &[
     "a", "b", "br", "caption", "col", "colgroup", "div", "em", "font", "i", "p", "s", "small",
-    "span", "strong", "sub", "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "u",
+    "img", "span", "strong", "sub", "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr",
+    "u",
 ];
 
 const PRESENTATIONAL_ATTRIBUTES: &[&str] = &[
@@ -14,6 +15,7 @@ const PRESENTATIONAL_ATTRIBUTES: &[&str] = &[
     "cellpadding",
     "cellspacing",
     "class",
+    "color",
     "face",
     "height",
     "nowrap",
@@ -23,7 +25,7 @@ const PRESENTATIONAL_ATTRIBUTES: &[&str] = &[
     "width",
 ];
 
-const NON_DATA_ATTRIBUTES: &[&str] = &["href"];
+const NON_DATA_ATTRIBUTES: &[&str] = &["href", "name"];
 
 const PRESERVED_ATTRIBUTES: &[&str] = &[
     "abbr", "colspan", "dir", "headers", "id", "lang", "rowspan", "scope", "title",
@@ -450,6 +452,7 @@ fn clean_once(table_html: &str) -> Result<String> {
     let mut document = Html::parse_fragment(table_html);
     validate(&document)?;
 
+    replace_images_with_text(&mut document);
     remove_visually_empty_rows(&mut document);
     attach_accounting_tokens(&mut document);
     remove_fully_empty_columns(&mut document);
@@ -470,6 +473,30 @@ fn clean_once(table_html: &str) -> Result<String> {
         bail!("table HTML cleanup changed table structure or semantic content");
     }
     Ok(cleaned)
+}
+
+fn replace_images_with_text(document: &mut Html) {
+    let image_selector = Selector::parse("img").expect("valid image selector");
+    let replacements = document
+        .select(&image_selector)
+        .map(|image| {
+            let replacement = image
+                .value()
+                .attr("alt")
+                .filter(|alt| !alt.trim().is_empty())
+                .unwrap_or("(image)")
+                .to_owned();
+            (image.id(), replacement)
+        })
+        .collect::<Vec<_>>();
+
+    for (id, replacement) in replacements {
+        let mut image = document.tree.get_mut(id).expect("image remains in tree");
+        image.insert_before(Node::Text(Text {
+            text: replacement.into(),
+        }));
+        image.detach();
+    }
 }
 
 fn normalize_nonbreaking_spaces(document: &mut Html) {
@@ -506,7 +533,12 @@ fn empty_whitespace_only_cells(document: &mut Html) {
                 && node.parent().is_some_and(|parent| {
                     parent.value().as_element().is_some_and(|element| {
                         matches!(element.name(), "td" | "th")
-                            && parent.children().all(|child| child.value().is_text())
+                            && parent.children().all(|child| {
+                                child
+                                    .value()
+                                    .as_text()
+                                    .is_some_and(|text| text.trim().is_empty())
+                            })
                     })
                 })
         })
@@ -654,9 +686,11 @@ fn validate(document: &Html) -> Result<()> {
             bail!("unsupported table element <{name}>");
         }
         for (attribute, _) in element.attrs() {
-            if !PRESENTATIONAL_ATTRIBUTES.contains(&attribute)
-                && !NON_DATA_ATTRIBUTES.contains(&attribute)
+            if !(PRESENTATIONAL_ATTRIBUTES.contains(&attribute)
+                && (attribute != "color" || name == "font"))
+                && !(NON_DATA_ATTRIBUTES.contains(&attribute) && name == "a")
                 && !PRESERVED_ATTRIBUTES.contains(&attribute)
+                && !(name == "img" && matches!(attribute, "alt" | "src"))
             {
                 bail!("unsupported attribute {attribute:?} on <{name}>");
             }
@@ -787,11 +821,16 @@ fn is_redundant_cell_wrapper(node: NodeRef<'_, Node>) -> bool {
         .as_element()
         .is_some_and(|element| matches!(element.name(), "div" | "p"))
         && node.parent().is_some_and(|parent| {
-            parent
-                .value()
-                .as_element()
-                .is_some_and(|element| matches!(element.name(), "td" | "th"))
-                && parent.children().count() == 1
+            parent.children().all(|child| {
+                child.id() == node.id()
+                    || child
+                        .value()
+                        .as_text()
+                        .is_some_and(|text| text.trim().is_empty())
+            }) && parent.value().as_element().is_some_and(|element| {
+                matches!(element.name(), "td" | "th")
+                    || (matches!(element.name(), "div" | "p") && is_redundant_cell_wrapper(parent))
+            })
         })
 }
 
@@ -1660,6 +1699,45 @@ mod tests {
                 "</table>"
             )
         );
+    }
+
+    #[test]
+    fn preserves_whitespace_between_unwrapped_text_nodes() {
+        let input =
+            "<table><tr><td><font>FFO</font><font> </font><font>(1)</font></td></tr></table>";
+
+        assert!(
+            clean_table_html(input)
+                .unwrap()
+                .contains("<td>FFO (1)</td>")
+        );
+    }
+
+    #[test]
+    fn unwraps_nested_cell_wrappers_despite_whitespace_siblings() {
+        let input = "<table><tr><td> <div><div><p>FFO</p></div></div> </td></tr></table>";
+
+        let cleaned = clean_table_html(input).unwrap();
+        assert!(!cleaned.contains("<div>"));
+        assert!(!cleaned.contains("<p>"));
+        assert_eq!(render_table_text(input).unwrap(), "FFO\n");
+    }
+
+    #[test]
+    fn replaces_images_with_alt_text_or_an_indicator() {
+        let with_alt =
+            r#"<table><tr><td>FFO</td><td><img src="chart.png" alt="FFO chart"></td></tr></table>"#;
+        let without_alt = r#"<table><tr><td>FFO</td><td><img src="chart.png"></td></tr></table>"#;
+
+        assert_eq!(render_table_text(with_alt).unwrap(), "FFO  FFO chart\n");
+        assert_eq!(render_table_text(without_alt).unwrap(), "FFO  (image)\n");
+    }
+
+    #[test]
+    fn removes_legacy_presentational_and_navigation_attributes() {
+        let input = r##"<table><tr><td><font color="black">FFO</font><a name="page"></a></td></tr></table>"##;
+
+        assert_eq!(render_table_text(input).unwrap(), "FFO\n");
     }
 
     #[test]
