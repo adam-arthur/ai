@@ -714,19 +714,21 @@ fn remove_non_data_attributes(document: &mut Html) {
 }
 
 fn unwrap_fonts(document: &mut Html) {
+    let font_selector = Selector::parse("font").expect("valid font selector");
     let font_ids = document
-        .tree
-        .nodes()
-        .filter(|node| {
-            node.value()
-                .as_element()
-                .is_some_and(|element| element.name() == "font")
-        })
-        .map(|node| node.id())
+        .select(&font_selector)
+        .map(|font| font.id())
         .collect::<Vec<_>>();
 
     // Innermost-first keeps nested font contents in their original order.
     for font_id in font_ids.into_iter().rev() {
+        if document
+            .tree
+            .get(font_id)
+            .is_none_or(|font| font.parent().is_none())
+        {
+            continue;
+        }
         let child_ids = document
             .tree
             .get(font_id)
@@ -1278,6 +1280,24 @@ mod tests {
     #[test]
     fn attaches_accounting_tokens_before_removing_their_columns() {
         let input = "<table><tr><td>$</td><td> (79,104</td><td>)</td><td><font>&nbsp;</font></td></tr></table>";
+
+        assert_eq!(
+            clean_table_html(input).unwrap(),
+            concat!(
+                "<table>\n",
+                "  <tbody>\n",
+                "    <tr>\n",
+                "      <td>$(79,104)</td>\n",
+                "    </tr>\n",
+                "  </tbody>\n",
+                "</table>"
+            )
+        );
+    }
+
+    #[test]
+    fn ignores_detached_font_wrapped_accounting_tokens() {
+        let input = "<table><tr><td><font>$</font></td><td><font> (79,104</font></td><td><font>)</font></td></tr></table>";
 
         assert_eq!(
             clean_table_html(input).unwrap(),
