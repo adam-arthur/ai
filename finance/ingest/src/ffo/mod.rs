@@ -11,11 +11,11 @@ use std::{
 use anyhow::{Context, Result};
 use reqwest::Url;
 
+mod candidate_tables;
 mod canonical;
 mod discovery;
 mod models;
 mod table_html;
-mod vision;
 
 use models::ExtractedFfoDocument;
 pub(crate) use models::ffo_name_changes;
@@ -113,7 +113,7 @@ pub async fn fetch_reit_ffo_data(
             );
         }
 
-        let mut vision_sources = Vec::new();
+        let mut candidate_sources = Vec::new();
         let mut written_paths = Vec::new();
         for ((source, bytes, content_type), local_name) in
             quarter_documents.into_iter().zip(local_names)
@@ -121,10 +121,10 @@ pub async fn fetch_reit_ffo_data(
             let local_path = document_dir.join(local_name);
             write_bytes_atomic(&local_path, &bytes)?;
             written_paths.push(local_path.clone());
-            vision_sources.push((local_path, content_type, bytes));
+            candidate_sources.push((local_path, content_type, bytes));
 
             // Value extraction will be supplied by the future LLM pipeline. Keep the source
-            // document in the canonicalization input so SEC pulling and candidate artifact
+            // document in the canonicalization input so SEC pulling and candidate table
             // generation continue unchanged, but do not publish inferred values yet.
             documents.push(ExtractedFfoDocument {
                 document: source,
@@ -132,9 +132,10 @@ pub async fn fetch_reit_ffo_data(
             });
         }
 
-        let image_count = match vision::ensure_candidate_artifacts(&document_dir, vision_sources)
-            .await
-        {
+        let table_count = match candidate_tables::ensure_candidate_tables(
+            &document_dir,
+            candidate_sources,
+        ) {
             Ok(count) => count,
             Err(error) => {
                 if quarter_existed {
@@ -145,18 +146,18 @@ pub async fn fetch_reit_ffo_data(
                 } else {
                     fs::remove_dir_all(&document_dir).with_context(|| {
                         format!(
-                            "FFO vision failed and incomplete quarter directory could not be removed: {}",
+                            "FFO table extraction failed and incomplete quarter directory could not be removed: {}",
                             document_dir.display()
                         )
                     })?;
                 }
-                return Err(error)
-                    .with_context(|| format!("FFO vision failed for {}", document_dir.display()));
+                return Err(error).with_context(|| {
+                    format!("FFO table extraction failed for {}", document_dir.display())
+                });
             }
         };
         log::debug!(
-            "FFO vision - cached {image_count} candidate image(s) in {} and raw table(s) in {}",
-            document_dir.join("vision").display(),
+            "FFO - cached {table_count} candidate table(s) in {}",
             document_dir.join("tables").display()
         );
         for accession in accessions {
