@@ -2,11 +2,11 @@
 
 export type KoreanTutorLevel = 'A1' | 'A2'
 
-export type TextModel = 'gemini-3.1-flash-lite' | 'gemini-3.5-flash' | 'gpt-5.5'
+export type TextModel = 'gemini-3.5-flash-lite' | 'gemini-3.6-flash' | 'gpt-5.6-terra'
 
-export type TranscriptionModel = 'gpt-4o-mini-transcribe' | 'gpt-4o-transcribe'
+export type TranscriptionModel = 'gpt-transcribe'
 
-export type SpeechSynthesisModel = 'tts-1'
+export type SpeechSynthesisModel = 'gpt-4o-mini-tts'
 
 export type ModelConfiguration = {
   mistakeDetection: TextModel

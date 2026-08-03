@@ -35,12 +35,27 @@ pub enum ModelId {
     #[strum(serialize = "gemini-3.1-flash-lite")]
     #[serde(rename = "gemini-3.1-flash-lite")]
     Gemini31FlashLite,
+    #[strum(serialize = "gemini-3.5-flash-lite")]
+    #[serde(rename = "gemini-3.5-flash-lite")]
+    Gemini35FlashLite,
     #[strum(serialize = "gemini-3.5-flash")]
     #[serde(rename = "gemini-3.5-flash")]
     Gemini35Flash,
+    #[strum(serialize = "gemini-3.6-flash")]
+    #[serde(rename = "gemini-3.6-flash")]
+    Gemini36Flash,
     #[strum(serialize = "gpt-5.5")]
     #[serde(rename = "gpt-5.5")]
     Gpt55,
+    #[strum(serialize = "gpt-5.6-sol")]
+    #[serde(rename = "gpt-5.6-sol")]
+    Gpt56Sol,
+    #[strum(serialize = "gpt-5.6-terra")]
+    #[serde(rename = "gpt-5.6-terra")]
+    Gpt56Terra,
+    #[strum(serialize = "gpt-5.6-luna")]
+    #[serde(rename = "gpt-5.6-luna")]
+    Gpt56Luna,
     GEMMA_4_E2B_Q4,
     GEMMA_4_E4B_Q4,
     GEMMA_4_12B_Q4,
@@ -59,8 +74,11 @@ impl ModelId {
 
     pub(crate) const fn backend(self) -> Backend {
         match self {
-            Self::Gemini31FlashLite | Self::Gemini35Flash => Backend::Gemini,
-            Self::Gpt55 => Backend::OpenAi,
+            Self::Gemini31FlashLite
+            | Self::Gemini35FlashLite
+            | Self::Gemini35Flash
+            | Self::Gemini36Flash => Backend::Gemini,
+            Self::Gpt55 | Self::Gpt56Sol | Self::Gpt56Terra | Self::Gpt56Luna => Backend::OpenAi,
             Self::GEMMA_4_E2B_Q4
             | Self::GEMMA_4_E4B_Q4
             | Self::GEMMA_4_12B_Q4
@@ -240,8 +258,13 @@ mod tests {
     fn every_supported_model_round_trips() {
         let wire_names = [
             "gemini-3.1-flash-lite",
+            "gemini-3.5-flash-lite",
             "gemini-3.5-flash",
+            "gemini-3.6-flash",
             "gpt-5.5",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
             "GEMMA_4_E2B_Q4",
             "GEMMA_4_E4B_Q4",
             "GEMMA_4_12B_Q4",

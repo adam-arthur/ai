@@ -18,6 +18,8 @@ impl Audio {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TranscriptionModelId {
+    #[serde(rename = "gpt-transcribe")]
+    GptTranscribe,
     #[serde(rename = "gpt-4o-mini-transcribe")]
     Gpt4oMiniTranscribe,
     #[serde(rename = "gpt-4o-transcribe")]
@@ -27,6 +29,7 @@ pub enum TranscriptionModelId {
 impl TranscriptionModelId {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::GptTranscribe => "gpt-transcribe",
             Self::Gpt4oMiniTranscribe => "gpt-4o-mini-transcribe",
             Self::Gpt4oTranscribe => "gpt-4o-transcribe",
         }
@@ -43,6 +46,8 @@ pub struct TranscriptionRequest {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpeechSynthesisModelId {
+    #[serde(rename = "gpt-4o-mini-tts")]
+    Gpt4oMiniTts,
     #[serde(rename = "tts-1")]
     Tts1,
 }
@@ -50,6 +55,7 @@ pub enum SpeechSynthesisModelId {
 impl SpeechSynthesisModelId {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Gpt4oMiniTts => "gpt-4o-mini-tts",
             Self::Tts1 => "tts-1",
         }
     }
@@ -61,4 +67,21 @@ pub struct SpeechSynthesisRequest {
     pub text: String,
     pub voice: String,
     pub instructions: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_audio_models_use_the_expected_wire_names() {
+        assert_eq!(
+            TranscriptionModelId::GptTranscribe.as_str(),
+            "gpt-transcribe"
+        );
+        assert_eq!(
+            SpeechSynthesisModelId::Gpt4oMiniTts.as_str(),
+            "gpt-4o-mini-tts"
+        );
+    }
 }

@@ -13,57 +13,53 @@ pub enum KoreanTutorLevel {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS)]
 pub enum TextModel {
-    #[serde(rename = "gemini-3.1-flash-lite")]
-    #[ts(rename = "gemini-3.1-flash-lite")]
-    Gemini31FlashLite,
-    #[serde(rename = "gemini-3.5-flash")]
-    #[ts(rename = "gemini-3.5-flash")]
-    Gemini35Flash,
-    #[serde(rename = "gpt-5.5")]
-    #[ts(rename = "gpt-5.5")]
-    Gpt55,
+    #[serde(rename = "gemini-3.5-flash-lite")]
+    #[ts(rename = "gemini-3.5-flash-lite")]
+    Gemini35FlashLite,
+    #[serde(rename = "gemini-3.6-flash")]
+    #[ts(rename = "gemini-3.6-flash")]
+    Gemini36Flash,
+    #[serde(rename = "gpt-5.6-terra")]
+    #[ts(rename = "gpt-5.6-terra")]
+    Gpt56Terra,
 }
 
 impl From<TextModel> for ModelId {
     fn from(model: TextModel) -> Self {
         match model {
-            TextModel::Gemini31FlashLite => Self::Gemini31FlashLite,
-            TextModel::Gemini35Flash => Self::Gemini35Flash,
-            TextModel::Gpt55 => Self::Gpt55,
+            TextModel::Gemini35FlashLite => Self::Gemini35FlashLite,
+            TextModel::Gemini36Flash => Self::Gemini36Flash,
+            TextModel::Gpt56Terra => Self::Gpt56Terra,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS)]
 pub enum TranscriptionModel {
-    #[serde(rename = "gpt-4o-mini-transcribe")]
-    #[ts(rename = "gpt-4o-mini-transcribe")]
-    Gpt4oMiniTranscribe,
-    #[serde(rename = "gpt-4o-transcribe")]
-    #[ts(rename = "gpt-4o-transcribe")]
-    Gpt4oTranscribe,
+    #[serde(rename = "gpt-transcribe")]
+    #[ts(rename = "gpt-transcribe")]
+    GptTranscribe,
 }
 
 impl From<TranscriptionModel> for TranscriptionModelId {
     fn from(model: TranscriptionModel) -> Self {
         match model {
-            TranscriptionModel::Gpt4oMiniTranscribe => Self::Gpt4oMiniTranscribe,
-            TranscriptionModel::Gpt4oTranscribe => Self::Gpt4oTranscribe,
+            TranscriptionModel::GptTranscribe => Self::GptTranscribe,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS)]
 pub enum SpeechSynthesisModel {
-    #[serde(rename = "tts-1")]
-    #[ts(rename = "tts-1")]
-    Tts1,
+    #[serde(rename = "gpt-4o-mini-tts")]
+    #[ts(rename = "gpt-4o-mini-tts")]
+    Gpt4oMiniTts,
 }
 
 impl From<SpeechSynthesisModel> for SpeechSynthesisModelId {
     fn from(model: SpeechSynthesisModel) -> Self {
         match model {
-            SpeechSynthesisModel::Tts1 => Self::Tts1,
+            SpeechSynthesisModel::Gpt4oMiniTts => Self::Gpt4oMiniTts,
         }
     }
 }
@@ -81,10 +77,10 @@ pub struct ModelConfiguration {
 impl Default for ModelConfiguration {
     fn default() -> Self {
         Self {
-            mistake_detection: TextModel::Gemini31FlashLite,
-            reply: TextModel::Gemini31FlashLite,
-            speech_synthesis: SpeechSynthesisModel::Tts1,
-            transcription: TranscriptionModel::Gpt4oMiniTranscribe,
+            mistake_detection: TextModel::Gemini35FlashLite,
+            reply: TextModel::Gemini35FlashLite,
+            speech_synthesis: SpeechSynthesisModel::Gpt4oMiniTts,
+            transcription: TranscriptionModel::GptTranscribe,
         }
     }
 }
@@ -322,10 +318,14 @@ mod tests {
     #[test]
     fn default_models_match_the_reliable_profile() {
         let models = ModelConfiguration::default();
-        assert_eq!(ModelId::from(models.reply).as_str(), "gemini-3.1-flash-lite");
+        assert_eq!(ModelId::from(models.reply).as_str(), "gemini-3.5-flash-lite");
         assert_eq!(
             TranscriptionModelId::from(models.transcription).as_str(),
-            "gpt-4o-mini-transcribe"
+            "gpt-transcribe"
+        );
+        assert_eq!(
+            SpeechSynthesisModelId::from(models.speech_synthesis).as_str(),
+            "gpt-4o-mini-tts"
         );
     }
 

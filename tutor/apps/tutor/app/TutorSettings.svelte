@@ -10,42 +10,41 @@
 
   const tutorLevels: KoreanTutorLevel[] = ['A1', 'A2']
   const modelLabels = {
-    'gemini-3.1-flash-lite': 'Gemini Flash-Lite',
-    'gemini-3.5-flash': 'Gemini Flash',
-    'gpt-4o-mini-transcribe': 'GPT-4o Mini',
-    'gpt-4o-transcribe': 'GPT-4o',
-    'gpt-5.5': 'GPT-5.5',
-    'tts-1': 'OpenAI TTS',
+    'gemini-3.5-flash-lite': 'Gemini 3.5 Flash-Lite',
+    'gemini-3.6-flash': 'Gemini 3.6 Flash',
+    'gpt-transcribe': 'GPT Transcribe',
+    'gpt-5.6-terra': 'GPT-5.6 Terra',
+    'gpt-4o-mini-tts': 'GPT-4o Mini TTS',
   } satisfies Record<TextModel | TranscriptionModel | SpeechSynthesisModel, string>
   const modelProfiles = [
     {
       id: 'reliable',
       label: 'Reliable',
       modelConfiguration: {
-        mistakeDetection: 'gemini-3.1-flash-lite',
-        reply: 'gemini-3.1-flash-lite',
-        speechSynthesis: 'tts-1',
-        transcription: 'gpt-4o-mini-transcribe',
+        mistakeDetection: 'gemini-3.5-flash-lite',
+        reply: 'gemini-3.5-flash-lite',
+        speechSynthesis: 'gpt-4o-mini-tts',
+        transcription: 'gpt-transcribe',
       },
     },
     {
       id: 'sharper',
       label: 'Sharper',
       modelConfiguration: {
-        mistakeDetection: 'gemini-3.1-flash-lite',
-        reply: 'gemini-3.5-flash',
-        speechSynthesis: 'tts-1',
-        transcription: 'gpt-4o-mini-transcribe',
+        mistakeDetection: 'gemini-3.5-flash-lite',
+        reply: 'gemini-3.6-flash',
+        speechSynthesis: 'gpt-4o-mini-tts',
+        transcription: 'gpt-transcribe',
       },
     },
     {
       id: 'gpt-reply',
       label: 'GPT reply',
       modelConfiguration: {
-        mistakeDetection: 'gemini-3.1-flash-lite',
-        reply: 'gpt-5.5',
-        speechSynthesis: 'tts-1',
-        transcription: 'gpt-4o-mini-transcribe',
+        mistakeDetection: 'gemini-3.5-flash-lite',
+        reply: 'gpt-5.6-terra',
+        speechSynthesis: 'gpt-4o-mini-tts',
+        transcription: 'gpt-transcribe',
       },
     },
   ] satisfies TutorModelProfile[]
