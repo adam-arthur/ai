@@ -8,25 +8,6 @@ const ALLOWED_ELEMENTS: &[&str] = &[
     "td", "tfoot", "th", "thead", "tr", "u",
 ];
 
-const PRESENTATIONAL_ATTRIBUTES: &[&str] = &[
-    "align",
-    "bgcolor",
-    "border",
-    "cellpadding",
-    "cellspacing",
-    "class",
-    "color",
-    "face",
-    "height",
-    "nowrap",
-    "size",
-    "style",
-    "valign",
-    "width",
-];
-
-const NON_DATA_ATTRIBUTES: &[&str] = &["href", "name"];
-
 const PRESERVED_ATTRIBUTES: &[&str] = &[
     "abbr", "colspan", "dir", "headers", "id", "lang", "rowspan", "scope", "title",
 ];
@@ -463,7 +444,7 @@ fn clean_once(table_html: &str) -> Result<String> {
     let before = semantic_projection(&document)?;
 
     normalize_nonbreaking_spaces(&mut document);
-    remove_non_data_attributes(&mut document);
+    remove_nonsemantic_attributes(&mut document);
     unwrap_redundant_cell_wrappers(&mut document);
     empty_whitespace_only_cells(&mut document);
     remove_structural_whitespace(&mut document);
@@ -688,17 +669,6 @@ fn validate(document: &Html) -> Result<()> {
         if !ALLOWED_ELEMENTS.contains(&name) {
             bail!("unsupported table element <{name}>");
         }
-        for (attribute, _) in element.attrs() {
-            if !(PRESENTATIONAL_ATTRIBUTES.contains(&attribute)
-                && (attribute != "color" || name == "font"))
-                && !(NON_DATA_ATTRIBUTES.contains(&attribute) && name == "a")
-                && !is_custom_data_attribute(attribute)
-                && !PRESERVED_ATTRIBUTES.contains(&attribute)
-                && !(name == "img" && matches!(attribute, "alt" | "src"))
-            {
-                bail!("unsupported attribute {attribute:?} on <{name}>");
-            }
-        }
     }
     Ok(())
 }
@@ -732,7 +702,7 @@ fn only_table(document: &Html) -> Result<ElementRef<'_>> {
     Ok(table)
 }
 
-fn remove_non_data_attributes(document: &mut Html) {
+fn remove_nonsemantic_attributes(document: &mut Html) {
     let element_ids = document
         .tree
         .nodes()
@@ -745,21 +715,16 @@ fn remove_non_data_attributes(document: &mut Html) {
         if let Node::Element(element) = node.value() {
             element
                 .attrs
-                .retain(|(name, _)| !is_removable_attribute(name.local.as_ref()));
+                .retain(|(name, _)| is_preserved_attribute(name.local.as_ref()));
         }
     }
 }
 
-fn is_removable_attribute(attribute: &str) -> bool {
-    PRESENTATIONAL_ATTRIBUTES.contains(&attribute)
-        || NON_DATA_ATTRIBUTES.contains(&attribute)
-        || is_custom_data_attribute(attribute)
-}
-
-fn is_custom_data_attribute(attribute: &str) -> bool {
-    attribute
-        .strip_prefix("data-")
-        .is_some_and(|name| !name.is_empty())
+fn is_preserved_attribute(attribute: &str) -> bool {
+    // Table data and layout depend on spans; the remaining attributes carry
+    // useful semantic metadata. Styling, browser behavior, and vendor-specific
+    // attributes do not affect the text grid and are safe to discard.
+    PRESERVED_ATTRIBUTES.contains(&attribute)
 }
 
 fn unwrap_fonts(document: &mut Html) {
@@ -1157,8 +1122,7 @@ fn has_meaningful_content(cell: ElementRef<'_>) -> bool {
             Node::Text(text) => !text.trim().is_empty(),
             Node::Comment(_) => true,
             Node::Element(element) => element.attrs().any(|(attribute, _)| {
-                PRESERVED_ATTRIBUTES.contains(&attribute)
-                    && !matches!(attribute, "colspan" | "rowspan")
+                is_preserved_attribute(attribute) && !matches!(attribute, "colspan" | "rowspan")
             }),
             _ => false,
         })
@@ -1264,7 +1228,7 @@ fn project_node(node: NodeRef<'_, Node>, projection: &mut Vec<SemanticToken>) {
             let name = element.name().to_owned();
             let mut attributes = element
                 .attrs()
-                .filter(|(attribute, _)| !is_removable_attribute(attribute))
+                .filter(|(attribute, _)| is_preserved_attribute(attribute))
                 .map(|(attribute, value)| (attribute.to_owned(), value.to_owned()))
                 .collect::<Vec<_>>();
             attributes.sort();
@@ -1795,11 +1759,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_markup_instead_of_guessing() {
-        let error = clean_table_html("<table><tr><td onclick=\"alert('x')\">FFO</td></tr></table>")
-            .unwrap_err();
+    fn removes_nonsemantic_attributes_without_enumerating_them() {
+        let input = concat!(
+            "<table bordercollapse=\"collapse\" vendor-layout=\"fixed\">",
+            "<tr><td onclick=\"alert('x')\">FFO</td></tr>",
+            "</table>"
+        );
 
-        assert!(error.to_string().contains("unsupported attribute"));
+        let cleaned = clean_table_html(input).unwrap();
+        assert!(!cleaned.contains("bordercollapse"));
+        assert!(!cleaned.contains("vendor-layout"));
+        assert!(!cleaned.contains("onclick"));
+        assert_eq!(render_table_text(input).unwrap(), "FFO\n");
     }
 
     #[test]
