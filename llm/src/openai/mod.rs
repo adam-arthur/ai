@@ -126,8 +126,8 @@ impl OpenAiClient {
         if let Some(prompt) = request.prompt {
             form = form.text("prompt", prompt);
         }
-        if let Some(language) = request.language_code {
-            form = form.text("language", language);
+        for language in request.language_codes {
+            form = form.text("languages[]", language);
         }
         let response = self
             .http

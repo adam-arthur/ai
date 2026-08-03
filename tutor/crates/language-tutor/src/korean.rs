@@ -137,9 +137,13 @@ impl KoreanTutor {
     ///
     /// Returns an error when a provider request fails, mistake JSON is invalid, or the tutor
     /// produces no response text.
-    pub async fn process_turn(
+    pub async fn process_turn<F>(
         &self, level: KoreanTutorLevel, models: ModelConfiguration, conversation: &[ConversationMessage], audio: Audio,
-    ) -> Result<TurnResult, TutorError> {
+        on_transcription: F,
+    ) -> Result<TurnResult, TutorError>
+    where
+        F: FnOnce(&str),
+    {
         let transcription = transcribe(TranscriptionRequest {
             model: models.transcription.into(),
             audio,
@@ -147,12 +151,13 @@ impl KoreanTutor {
                 "The audio may contain Korean learner speech, Hangul, romanized Korean, and occasional English."
                     .to_owned(),
             ),
-            language_code: None,
+            language_codes: vec!["ko".to_owned(), "en".to_owned()],
         })
         .await
         .map_err(TutorError::Provider)?
         .trim()
         .to_owned();
+        on_transcription(&transcription);
 
         let previous_tutor_text = conversation
             .iter()

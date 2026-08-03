@@ -79,6 +79,8 @@ impl SessionService {
         let session = self.session(id).await?;
         let mut session = session.lock().await;
         let transcription_audio = to_transcription_audio(audio)?;
+        let transcription_events = session.events.clone();
+        let transcription_input_id = input_id.clone();
         let result = self
             .tutor
             .process_turn(
@@ -86,6 +88,12 @@ impl SessionService {
                 session.models,
                 &session.conversation,
                 transcription_audio,
+                move |text| {
+                    let _ = transcription_events.send(SessionEvent::InputTranscription {
+                        input_id: transcription_input_id,
+                        text: text.to_owned(),
+                    });
+                },
             )
             .await;
 
@@ -103,10 +111,6 @@ impl SessionService {
         session.conversation.push(ConversationMessage {
             role: language_tutor::ConversationRole::Learner,
             text: result.transcription.clone(),
-        });
-        let _ = session.events.send(SessionEvent::InputTranscription {
-            input_id: input_id.clone(),
-            text: result.transcription,
         });
         if !result.mistakes.is_empty() {
             let _ = session.events.send(SessionEvent::TurnMistakes {

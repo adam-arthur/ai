@@ -41,7 +41,7 @@ pub struct TranscriptionRequest {
     pub model: TranscriptionModelId,
     pub audio: Audio,
     pub prompt: Option<String>,
-    pub language_code: Option<String>,
+    pub language_codes: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
