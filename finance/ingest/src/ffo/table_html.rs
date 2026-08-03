@@ -459,11 +459,11 @@ fn clean_once(table_html: &str) -> Result<String> {
     remove_visually_empty_rows(&mut document);
     attach_accounting_tokens(&mut document);
     remove_fully_empty_columns(&mut document);
+    unwrap_fonts(&mut document);
     let before = semantic_projection(&document)?;
 
     normalize_nonbreaking_spaces(&mut document);
     remove_non_data_attributes(&mut document);
-    unwrap_fonts(&mut document);
     unwrap_redundant_cell_wrappers(&mut document);
     empty_whitespace_only_cells(&mut document);
     remove_structural_whitespace(&mut document);
@@ -692,6 +692,7 @@ fn validate(document: &Html) -> Result<()> {
             if !(PRESENTATIONAL_ATTRIBUTES.contains(&attribute)
                 && (attribute != "color" || name == "font"))
                 && !(NON_DATA_ATTRIBUTES.contains(&attribute) && name == "a")
+                && !is_custom_data_attribute(attribute)
                 && !PRESERVED_ATTRIBUTES.contains(&attribute)
                 && !(name == "img" && matches!(attribute, "alt" | "src"))
             {
@@ -742,12 +743,23 @@ fn remove_non_data_attributes(document: &mut Html) {
     for id in element_ids {
         let mut node = document.tree.get_mut(id).expect("node remains in tree");
         if let Node::Element(element) = node.value() {
-            element.attrs.retain(|(name, _)| {
-                !PRESENTATIONAL_ATTRIBUTES.contains(&name.local.as_ref())
-                    && !NON_DATA_ATTRIBUTES.contains(&name.local.as_ref())
-            });
+            element
+                .attrs
+                .retain(|(name, _)| !is_removable_attribute(name.local.as_ref()));
         }
     }
+}
+
+fn is_removable_attribute(attribute: &str) -> bool {
+    PRESENTATIONAL_ATTRIBUTES.contains(&attribute)
+        || NON_DATA_ATTRIBUTES.contains(&attribute)
+        || is_custom_data_attribute(attribute)
+}
+
+fn is_custom_data_attribute(attribute: &str) -> bool {
+    attribute
+        .strip_prefix("data-")
+        .is_some_and(|name| !name.is_empty())
 }
 
 fn unwrap_fonts(document: &mut Html) {
@@ -1252,10 +1264,7 @@ fn project_node(node: NodeRef<'_, Node>, projection: &mut Vec<SemanticToken>) {
             let name = element.name().to_owned();
             let mut attributes = element
                 .attrs()
-                .filter(|(attribute, _)| {
-                    !PRESENTATIONAL_ATTRIBUTES.contains(attribute)
-                        && !NON_DATA_ATTRIBUTES.contains(attribute)
-                })
+                .filter(|(attribute, _)| !is_removable_attribute(attribute))
                 .map(|(attribute, value)| (attribute.to_owned(), value.to_owned()))
                 .collect::<Vec<_>>();
             attributes.sort();
@@ -1742,6 +1751,24 @@ mod tests {
     }
 
     #[test]
+    fn unwraps_wrappers_that_become_redundant_after_fonts() {
+        let input = r##"<table><tr><td><font id="anchor"></font><div><a href="#page">32</a></div></td></tr></table>"##;
+
+        assert_eq!(
+            clean_table_html(input).unwrap(),
+            concat!(
+                "<table>\n",
+                "  <tbody>\n",
+                "    <tr>\n",
+                "      <td><a>32</a></td>\n",
+                "    </tr>\n",
+                "  </tbody>\n",
+                "</table>"
+            )
+        );
+    }
+
+    #[test]
     fn replaces_images_with_alt_text_or_an_indicator() {
         let with_alt =
             r#"<table><tr><td>FFO</td><td><img src="chart.png" alt="FFO chart"></td></tr></table>"#;
@@ -1759,9 +1786,18 @@ mod tests {
     }
 
     #[test]
+    fn removes_custom_data_attributes() {
+        let input = r#"<table data-source="filing"><tr data-row="result"><td data-celltype="desc">FFO</td></tr></table>"#;
+
+        let cleaned = clean_table_html(input).unwrap();
+        assert!(!cleaned.contains("data-"));
+        assert_eq!(render_table_text(input).unwrap(), "FFO\n");
+    }
+
+    #[test]
     fn rejects_unknown_markup_instead_of_guessing() {
-        let error =
-            clean_table_html("<table data-source=\"x\"><tr><td>FFO</td></tr></table>").unwrap_err();
+        let error = clean_table_html("<table><tr><td onclick=\"alert('x')\">FFO</td></tr></table>")
+            .unwrap_err();
 
         assert!(error.to_string().contains("unsupported attribute"));
     }
