@@ -61,7 +61,7 @@ pub async fn fetch_reit_ffo_data(
     data_dir: impl AsRef<Path>,
 ) -> Result<ReitFfoData> {
     let data_dir = data_dir.as_ref();
-    let filings = discovery::discover_reit_ffo_filings(cik).await?;
+    let filings = discovery::discover_reit_ffo_filings_to_cache(cik, data_dir, symbol).await?;
     let mut documents = Vec::new();
     let mut candidate_sources_by_period =
         BTreeMap::<String, Vec<(PathBuf, Option<String>, Vec<u8>)>>::new();
@@ -533,6 +533,10 @@ mod tests {
         assert_eq!(
             skipped_files_path(data_dir, "VICI", "2026"),
             Path::new("data/sec/cache/VICI/2026.json")
+        );
+        assert_eq!(
+            discovery::filing_index_cache_path(data_dir, "VICI", accession),
+            Path::new("data/sec/filing-index/VICI/0000123-26-000001.json")
         );
         assert_eq!(
             derived_quarter_dir(data_dir, "VICI", "2025-q4"),
