@@ -16,12 +16,15 @@ A personal Korean voice tutor with a Rust server and a Svelte browser interface.
 
 Copy `.env.example` to `.env` and set `OPENAI_API_KEY` and `GEMINI_API_KEY`. The server temporarily also recognizes the old `packages/llm/.env` location.
 
-Run the backend and frontend in separate terminals:
+Run the backend and frontend together:
 
 ```sh
-npm run dev:server
-npm run dev:web
+cargo dev
 ```
+
+Press Ctrl+C to gracefully stop both processes. The individual
+`npm run dev:server` and `npm run dev:web` commands remain available when only
+one side is needed.
 
 Vite serves the UI and proxies `/api` to the Rust server at `127.0.0.1:3000`.
 

@@ -1,0 +1,5 @@
+[unstable]
+script = true
+
+[alias]
+dev = "run --manifest-path scripts/dev.rs"
