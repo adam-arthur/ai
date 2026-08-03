@@ -26,7 +26,7 @@
   let activeAgentMessageId = $state<string | undefined>()
   let activeAudioChunks: AudioInput[] = []
   let autoPauseAfterResponse = $state(false)
-  let autoTurnSilenceMs = $state(1000)
+  let autoTurnSilenceMs = $state(2000)
   let currentInputId = $state<string | undefined>()
   let errorMessage = $state<string | undefined>()
   let microphoneStatus = $state<MicrophoneStatus>('idle')
